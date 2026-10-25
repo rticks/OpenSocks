@@ -605,16 +605,29 @@ for apk in "$@"; do
 done
 set -- "$OUT"/repo/*.apk
 
-# mkndx re-reads every package through apk_extract and refuses an unsigned one
-# ("UNTRUSTED signature"), so the packages must already carry a signature from
-# mkpkg. --sign-key also loads the key into the trusted set for this run, which
-# is what lets mkndx verify them; the same key is therefore passed to every
-# mkpkg above.
+# mkndx re-reads every package through apk_extract and refuses one whose
+# signature it cannot verify ("UNTRUSTED signature"), so two things must line up:
+#
+#   * mkpkg must have signed each package (it does; SIGNING_KEY is passed above).
+#   * mkndx must TRUST the matching public key. --sign-key loads the private key
+#     into trust->private_key_list (for creating signatures); verification
+#     instead walks trust->trusted_key_list, which is populated ONLY from
+#     --keys-dir (or the default etc/apk/keys and lib/apk/keys directories,
+#     see apk_ctx_get_trust in src/context.c).
+#
+# So mkndx gets --keys-dir pointing at a directory holding the PUBLIC half.
+keys_dir="$WORK/trusted"
+mkdir -p "$keys_dir"
+cp "$PUBLIC_KEY" "$keys_dir/opensocks.pem"
+
 run_mkndx() {
 	# mkndx writes diagnostics to stderr; keep them for the failure path and for
 	# the pkgname-spec check below, and echo them when it fails so the log says
 	# why instead of only "exit code 1".
-	if "$APK_BIN" ${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} mkndx \
+	if "$APK_BIN" \
+		--keys-dir "$keys_dir" \
+		${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} \
+		mkndx \
 		--output "$OUT/repo/packages.adb" \
 		--description "OpenSocks $VERSION" \
 		--pkgname-spec "$PKGNAME_SPEC" \
