@@ -679,10 +679,12 @@ fi
 if [ "${APK_SKIP_VERIFY:-0}" = "1" ]; then
 	printf 'apk self verification skipped (APK_SKIP_VERIFY=1)\n' >&2
 else
-	# 1. Integrity and signature of the index and of every package.
-	"$APK_BIN" verify "$OUT/repo/packages.adb"
+	# 1. Integrity and signature of the index and of every package. verify needs
+	#    --keys-dir too: like mkndx it checks against trusted_key_list, which only
+	#    --keys-dir populates.
+	"$APK_BIN" --keys-dir "$keys_dir" verify "$OUT/repo/packages.adb"
 	for apk in "$OUT"/repo/*.apk; do
-		"$APK_BIN" verify "$apk"
+		"$APK_BIN" --keys-dir "$keys_dir" verify "$apk"
 	done
 
 	# 2. Install smoke test in a throwaway root. --arch is mandatory; without
