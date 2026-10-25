@@ -706,12 +706,6 @@ else
 	done < "$WORK/targets.txt"
 	[ -n "$real_arch" ] || real_arch="$default_suffix"
 
-	smoke_stub="$WORK/stub"
-	rm -rf "$smoke_stub"
-	mkdir -p "$smoke_stub/lib/modules"
-	: > "$smoke_stub/lib/modules/.keep"
-	normalise_stage "$smoke_stub"
-
 	# The union of everything the three packages depend on. libc is an ordinary apk
 	# dependency rather than something apk synthesises, so it needs a stub too;
 	# the engine names are excluded because the packages provide them.
@@ -736,10 +730,16 @@ luci-base luci-compat luci-lua-runtime curl"
 		printf 'file://%s/repo/packages.adb\n' "$OUT" \
 			> "$WORK/repositories-$smoke_arch.list"
 
-		# One stub package per external dependency, each carrying the whole
-		# stub tree (a harmless lib/modules marker).
+		# One stub package per external dependency. Each carries its OWN file:
+		# apk refuses to install two packages that own the same path, so a shared
+		# marker would make the stubs conflict with each other.
 		stub_list=""
 		for name in $stub_pkgs; do
+			one_stub="$WORK/stub-$smoke_arch-$name"
+			rm -rf "$one_stub"
+			mkdir -p "$one_stub/usr/lib/opensocks-stubs"
+			: > "$one_stub/usr/lib/opensocks-stubs/$name"
+			normalise_stage "$one_stub"
 			stub_apk="$WORK/stub-$name-$smoke_arch.apk"
 			rm -f "$stub_apk"
 			"$APK_BIN" mkpkg \
@@ -747,7 +747,7 @@ luci-base luci-compat luci-lua-runtime curl"
 				--info version:0 \
 				--info arch:"$smoke_arch" \
 				--info description:"smoke test stub for $name" \
-				--files "$smoke_stub" \
+				--files "$one_stub" \
 				--output "$stub_apk" \
 				--xattrs=no
 			stub_list="$stub_list $stub_apk"
