@@ -767,12 +767,23 @@ luci-base luci-compat luci-lua-runtime curl"
 		smoke_cache="$root/var/cache/apk"
 		mkdir -p "$smoke_cache"
 
+		# apk only selects a package whose arch is in the root's --arch set. The
+		# daemon is arch specific (mipsel_24kc, ...), the launcher and the LuCI
+		# app are noarch, and a real router has its own arch plus noarch. Model
+		# that: the root accepts both, and each install set names packages that
+		# exist for the arch under test.
+		smoke_arch_args="--arch $smoke_arch --arch noarch"
+		if [ "$smoke_arch" = "noarch" ]; then
+			smoke_arch_args="--arch noarch"
+		fi
+
 		# The engine packages CONFLICT by design (both provide
 		# opensocks-engine), so they must be installed one per root; installing
 		# them together is expected to fail. The LuCI app depends on the virtual
-		# name, so either engine satisfies it.
-		for install_set in "opensocks" "opensocks-minimal" \
-			"opensocks-minimal luci-app-opensocks"; do
+		# name, so either engine satisfies it. The arch-specific daemon only
+		# exists for a real architecture, so it is skipped in the noarch root.
+		smoke_one() {
+			install_set="$1"
 			inc_root="$WORK/inc-$smoke_arch-$(echo "$install_set" | tr ' ' '_')"
 			rm -rf "$inc_root"
 			mkdir -p "$inc_root/etc/apk/keys" "$inc_root/var/cache/apk"
@@ -781,8 +792,7 @@ luci-base luci-compat luci-lua-runtime curl"
 			# --allow-untrusted covers the stubs, which are not in any signed
 			# index. Our own packages are still checked against the index.
 			# shellcheck disable=SC2086
-			"$APK_BIN" --root "$inc_root" \
-				--arch "$smoke_arch" --arch noarch \
+			"$APK_BIN" --root "$inc_root" $smoke_arch_args \
 				--keys-dir /etc/apk/keys \
 				--repositories-file "$WORK/repositories-$smoke_arch.list" \
 				--cache-dir "$inc_root/var/cache/apk" \
@@ -795,7 +805,7 @@ luci-base luci-compat luci-lua-runtime curl"
 			}
 
 			for pkg in $install_set; do
-				"$APK_BIN" --root "$inc_root" --arch "$smoke_arch" --arch noarch \
+				"$APK_BIN" --root "$inc_root" $smoke_arch_args \
 					--keys-dir /etc/apk/keys ${smoke_usermode:+--usermode} \
 					info -e "$pkg" >/dev/null || {
 					printf 'smoke test failed: %s missing after install for %s\n' \
@@ -807,11 +817,35 @@ luci-base luci-compat luci-lua-runtime curl"
 				printf 'smoke test failed: init script missing for %s\n' "$smoke_arch" >&2
 				exit 1
 			}
-			[ -f "$inc_root/usr/lib/opensocks/opensocks.gz" ] || {
-				printf 'smoke test failed: daemon payload missing for %s\n' "$smoke_arch" >&2
-				exit 1
-			}
-		done
+			# The launcher package ships no daemon payload (it downloads it), so
+			# only the full package has one.
+			case "$install_set" in
+			*opensocks-minimal*)
+				[ -f "$inc_root/usr/lib/opensocks/launcher.sh" ] || {
+					printf 'smoke test failed: launcher missing for %s\n' "$smoke_arch" >&2
+					exit 1
+				}
+				;;
+			esac
+			case "$install_set" in
+			opensocks|opensocks\ *)
+				[ -f "$inc_root/usr/lib/opensocks/opensocks.gz" ] || {
+					printf 'smoke test failed: daemon payload missing for %s\n' "$smoke_arch" >&2
+					exit 1
+				}
+				;;
+			esac
+		}
+
+		if [ "$smoke_arch" = "noarch" ]; then
+			# Only the arch-independent packages exist for a noarch root.
+			smoke_one "opensocks-minimal"
+			smoke_one "opensocks-minimal luci-app-opensocks"
+		else
+			smoke_one "opensocks"
+			smoke_one "opensocks-minimal"
+			smoke_one "opensocks-minimal luci-app-opensocks"
+		fi
 		printf 'smoke test passed for %s\n' "$smoke_arch"
 	}
 
