@@ -42,8 +42,9 @@ command -v jq >/dev/null
 # usign is only needed to verify a SIGNED opkg feed. A fork that does not own the
 # upstream key publishes an unsigned opkg index, and must still be able to sync
 # the apk feed, so the binary is not a hard requirement here; the branches below
-# check it before actually invoking it.
-if [ -n "${REQUIRE_USIGN:-0}" ] && [ "${REQUIRE_USIGN}" = "1" ]; then
+# check it before actually invoking it. (Under "set -u" the second expansion must
+# not mention REQUIRE_USIGN unguarded, or the script dies when it is unset.)
+if [ "${REQUIRE_USIGN:-0}" = "1" ]; then
 	test -x "$usign_bin"
 fi
 
