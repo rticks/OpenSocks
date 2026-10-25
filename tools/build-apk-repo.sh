@@ -687,11 +687,14 @@ else
 		"$APK_BIN" --keys-dir "$keys_dir" verify "$apk"
 	done
 
-	# 2. Install smoke test in a throwaway root. --arch is mandatory; without
-	#    it apk falls back to the build host's architecture and every package
-	#    looks uninstallable. kmod-nft-tproxy is stubbed because this root has
-	#    no target kmods feed; the point is to prove our own metadata, file
-	#    layout and signature work.
+	# 2. Install smoke test in a throwaway root. --arch is mandatory; without it
+	#    apk falls back to the build host's architecture and our packages look
+	#    uninstallable.
+	#
+	#    Every external dependency is stubbed: this root has no OpenWrt feeds, so
+	#    ca-bundle, uci, luci-base and friends cannot be resolved, and that says
+	#    nothing about our packages. What the test proves is our own metadata,
+	#    file layout, dependencies and signatures.
 	real_arch=""
 	while IFS= read -r target; do
 		[ -n "$target" ] || continue
@@ -708,6 +711,12 @@ else
 	mkdir -p "$smoke_stub/lib/modules"
 	: > "$smoke_stub/lib/modules/.keep"
 	normalise_stage "$smoke_stub"
+
+	# The union of everything the three packages depend on, minus libc (present
+	# in every apk root) and the engine names, which the packages themselves
+	# provide.
+	stub_pkgs="nftables-json kmod-nft-tproxy ca-bundle uci wget-ssl usign \
+luci-base luci-compat luci-lua-runtime curl"
 
 	run_smoke() {
 		smoke_arch="$1"
@@ -727,16 +736,22 @@ else
 		printf 'file://%s/repo/packages.adb\n' "$OUT" \
 			> "$WORK/repositories-$smoke_arch.list"
 
-		stub_apk="$WORK/kmod-nft-tproxy-$smoke_arch.apk"
-		rm -f "$stub_apk"
-		"$APK_BIN" mkpkg \
-			--info name:kmod-nft-tproxy \
-			--info version:0 \
-			--info arch:"$smoke_arch" \
-			--info description:"smoke test stub for the kernel module" \
-			--files "$smoke_stub" \
-			--output "$stub_apk" \
-			--xattrs=no
+		# One stub package per external dependency, each carrying the whole
+		# stub tree (a harmless lib/modules marker).
+		stub_list=""
+		for name in $stub_pkgs; do
+			stub_apk="$WORK/stub-$name-$smoke_arch.apk"
+			rm -f "$stub_apk"
+			"$APK_BIN" mkpkg \
+				--info "name:$name" \
+				--info version:0 \
+				--info arch:"$smoke_arch" \
+				--info description:"smoke test stub for $name" \
+				--files "$smoke_stub" \
+				--output "$stub_apk" \
+				--xattrs=no
+			stub_list="$stub_list $stub_apk"
+		done
 
 		# apk refuses to create a database as non-root unless --usermode is
 		# given (src/context.c), and rejects --usermode when running as root, so
@@ -748,39 +763,55 @@ else
 		fi
 
 		# In usermode apk keeps the cache and database under its own paths, so
-		# point --cache-dir at a directory this user can create. The absolute
-		# path is inside the throwaway root either way.
+		# point --cache-dir at a directory this user can create.
 		smoke_cache="$root/var/cache/apk"
 		mkdir -p "$smoke_cache"
 
-		# --allow-untrusted covers the stub package, which is not in any signed
-		# index. The real packages are still checked against the index hash.
-		"$APK_BIN" --root "$root" \
-			--arch "$smoke_arch" --arch noarch \
-			--keys-dir /etc/apk/keys \
-			--repositories-file "$WORK/repositories-$smoke_arch.list" \
-			--cache-dir "$smoke_cache" \
-			${smoke_usermode:+--usermode} \
-			add --initdb --no-scripts --allow-untrusted "$stub_apk" \
-			opensocks opensocks-minimal luci-app-opensocks >/dev/null
+		# The engine packages CONFLICT by design (both provide
+		# opensocks-engine), so they must be installed one per root; installing
+		# them together is expected to fail. The LuCI app depends on the virtual
+		# name, so either engine satisfies it.
+		for install_set in "opensocks" "opensocks-minimal" \
+			"opensocks-minimal luci-app-opensocks"; do
+			inc_root="$WORK/inc-$smoke_arch-$(echo "$install_set" | tr ' ' '_')"
+			rm -rf "$inc_root"
+			mkdir -p "$inc_root/etc/apk/keys" "$inc_root/var/cache/apk"
+			cp "$PUBLIC_KEY" "$inc_root/etc/apk/keys/opensocks.pem"
 
-		for pkg in opensocks opensocks-minimal luci-app-opensocks; do
-			"$APK_BIN" --root "$root" --arch "$smoke_arch" --arch noarch \
-				--keys-dir /etc/apk/keys ${smoke_usermode:+--usermode} \
-				info -e "$pkg" >/dev/null || {
-				printf 'smoke test failed: %s missing after install for %s\n' \
-					"$pkg" "$smoke_arch" >&2
+			# --allow-untrusted covers the stubs, which are not in any signed
+			# index. Our own packages are still checked against the index.
+			# shellcheck disable=SC2086
+			"$APK_BIN" --root "$inc_root" \
+				--arch "$smoke_arch" --arch noarch \
+				--keys-dir /etc/apk/keys \
+				--repositories-file "$WORK/repositories-$smoke_arch.list" \
+				--cache-dir "$inc_root/var/cache/apk" \
+				${smoke_usermode:+--usermode} \
+				add --initdb --no-scripts --allow-untrusted $stub_list \
+				$install_set >/dev/null || {
+				printf 'smoke test failed: cannot install [%s] for %s\n' \
+					"$install_set" "$smoke_arch" >&2
+				exit 1
+			}
+
+			for pkg in $install_set; do
+				"$APK_BIN" --root "$inc_root" --arch "$smoke_arch" --arch noarch \
+					--keys-dir /etc/apk/keys ${smoke_usermode:+--usermode} \
+					info -e "$pkg" >/dev/null || {
+					printf 'smoke test failed: %s missing after install for %s\n' \
+						"$pkg" "$smoke_arch" >&2
+					exit 1
+				}
+			done
+			[ -f "$inc_root/etc/init.d/opensocks" ] || {
+				printf 'smoke test failed: init script missing for %s\n' "$smoke_arch" >&2
+				exit 1
+			}
+			[ -f "$inc_root/usr/lib/opensocks/opensocks.gz" ] || {
+				printf 'smoke test failed: daemon payload missing for %s\n' "$smoke_arch" >&2
 				exit 1
 			}
 		done
-		[ -f "$root/etc/init.d/opensocks" ] || {
-			printf 'smoke test failed: init script missing for %s\n' "$smoke_arch" >&2
-			exit 1
-		}
-		[ -f "$root/usr/lib/opensocks/opensocks.gz" ] || {
-			printf 'smoke test failed: daemon payload missing for %s\n' "$smoke_arch" >&2
-			exit 1
-		}
 		printf 'smoke test passed for %s\n' "$smoke_arch"
 	}
 
