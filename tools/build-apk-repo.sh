@@ -747,13 +747,19 @@ else
 			smoke_usermode="--usermode"
 		fi
 
+		# In usermode apk keeps the cache and database under its own paths, so
+		# point --cache-dir at a directory this user can create. The absolute
+		# path is inside the throwaway root either way.
+		smoke_cache="$root/var/cache/apk"
+		mkdir -p "$smoke_cache"
+
 		# --allow-untrusted covers the stub package, which is not in any signed
 		# index. The real packages are still checked against the index hash.
 		"$APK_BIN" --root "$root" \
 			--arch "$smoke_arch" --arch noarch \
 			--keys-dir /etc/apk/keys \
 			--repositories-file "$WORK/repositories-$smoke_arch.list" \
-			--cache-dir /var/cache/apk \
+			--cache-dir "$smoke_cache" \
 			${smoke_usermode:+--usermode} \
 			add --initdb --no-scripts --allow-untrusted "$stub_apk" \
 			opensocks opensocks-minimal luci-app-opensocks >/dev/null
