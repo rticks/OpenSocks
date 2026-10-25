@@ -73,7 +73,6 @@ jobs:
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
         run: |
           set -eu
-          test -n "$OPKG_SIGNING_KEY" || { echo 'OPKG_SIGNING_KEY secret is required' >&2; exit 1; }
           VERSION="$(sed -n 's/^PKG_VERSION:=//p' openwrt/opensocks/Makefile)"
           RELEASE="$(sed -n 's/^PKG_RELEASE:=//p' openwrt/opensocks/Makefile)"
           test -n "$VERSION" && test -n "$RELEASE"
@@ -84,8 +83,31 @@ jobs:
             test "$(sed -n 's/^PKG_VERSION:=//p' "$makefile")" = "$VERSION"
             test "$(sed -n 's/^PKG_RELEASE:=//p' "$makefile")" = "$RELEASE"
           done
+
+          # Signing keys are repository secrets. A fork, or a workflow_dispatch
+          # on a branch, has none: those runs still build and verify both feeds
+          # so the packaging pipeline is exercised, but publish UNSIGNED
+          # indexes. Only a tagged release must be signed, because that is the
+          # artifact users actually install from.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            test -n "$OPKG_SIGNING_KEY" || {
+              echo 'OPKG_SIGNING_KEY secret is required for a tagged release' >&2
+              exit 1
+            }
+            REQUIRE_SIGNATURE=1
+          else
+            REQUIRE_SIGNATURE=0
+          fi
+
           umask 077
-          printf '%s\n' "$OPKG_SIGNING_KEY" > "${RUNNER_TEMP}/opensocks-usign.sec"
+          if [ -n "$OPKG_SIGNING_KEY" ]; then
+            printf '%s\n' "$OPKG_SIGNING_KEY" > "${RUNNER_TEMP}/opensocks-usign.sec"
+            export OPKG_SIGNING_KEY_FILE="${RUNNER_TEMP}/opensocks-usign.sec"
+            export OPKG_PUBLIC_KEY_FILE="$GITHUB_WORKSPACE/keys/d24a5e234001294c"
+          else
+            echo 'OPKG_SIGNING_KEY not set: building an UNSIGNED opkg feed' >&2
+          fi
+
           # Materialise the apk key pair when the secrets exist. build-release.sh
           # picks these up via APK_SIGNING_KEY_FILE / APK_PUBLIC_KEY_FILE.
           if [ -n "${APK_SIGNING_KEY_PEM}" ] && [ -n "${APK_PUBLIC_KEY_PEM}" ]; then
@@ -96,28 +118,33 @@ jobs:
           else
             echo 'APK_SIGNING_KEY_PEM not set: publishing an UNSIGNED apk feed' >&2
           fi
-          OPENWRT_ONLY=1 \
-          BUILD_APK=1 \
-          REQUIRE_SIGNATURE=1 \
-          RELEASE_DIR="$RELEASE_DIR" \
-          VERSION="$VERSION" \
-          RELEASE="$RELEASE" \
-          USIGN="${RUNNER_TEMP}/usign/build/usign" \
-          OPKG_SIGNING_KEY_FILE="${RUNNER_TEMP}/opensocks-usign.sec" \
-          OPKG_PUBLIC_KEY_FILE="$GITHUB_WORKSPACE/keys/d24a5e234001294c" \
+
+          # Exported for build-release.sh; keep REQUIRE_SIGNATURE explicit so a
+          # branch build without secrets does not fail on the opkg index.
+          export OPENWRT_ONLY=1
+          export BUILD_APK=1
+          export REQUIRE_SIGNATURE
+          export RELEASE_DIR VERSION RELEASE
+          export USIGN="${RUNNER_TEMP}/usign/build/usign"
           ./tools/build-release.sh
 
       - name: Verify opkg feed
         env:
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
+          # Mirrors the Build step: a tagged release must be signed, a branch
+          # build without the secret ships an unsigned index instead.
+          REQUIRE_SIGNATURE: ${{ github.ref_type == 'tag' && '1' || '0' }}
         run: |
           set -eu
           test -s "$RELEASE_DIR/Packages"
           test -s "$RELEASE_DIR/Packages.gz"
-          test -s "$RELEASE_DIR/Packages.sig"
-          test -s "$RELEASE_DIR/SHA256SUMS"
-          test -s "$RELEASE_DIR/SHA256SUMS.sig"
-          test -s "$RELEASE_DIR/d24a5e234001294c"
+          if [ "$REQUIRE_SIGNATURE" = "1" ]; then
+            test -s "$RELEASE_DIR/Packages.sig"
+            test -s "$RELEASE_DIR/SHA256SUMS.sig"
+            test -s "$RELEASE_DIR/d24a5e234001294c"
+          else
+            echo 'opkg feed is UNSIGNED (OPKG_SIGNING_KEY secret not configured)' >&2
+          fi
           ipk_count="$(find "$RELEASE_DIR" -maxdepth 1 -name '*.ipk' | wc -l | tr -d ' ')"
           # multi-arch: luci + minimal + at least mipsel and one aarch64 opensocks package
           test "$ipk_count" -ge 4
@@ -134,8 +161,10 @@ jobs:
           fi
           gzip -t "$RELEASE_DIR/Packages.gz"
           (cd "$RELEASE_DIR" && shasum -a 256 -c SHA256SUMS)
-          "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/Packages" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/Packages.sig"
-          "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/SHA256SUMS" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/SHA256SUMS.sig"
+          if [ "$REQUIRE_SIGNATURE" = "1" ]; then
+            "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/Packages" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/Packages.sig"
+            "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/SHA256SUMS" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/SHA256SUMS.sig"
+          fi
 
       - name: Verify apk feed
         env:
