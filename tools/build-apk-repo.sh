@@ -738,6 +738,15 @@ else
 			--output "$stub_apk" \
 			--xattrs=no
 
+		# apk refuses to create a database as non-root unless --usermode is
+		# given (src/context.c), and rejects --usermode when running as root, so
+		# pick the flag from the current uid: CI runners are ordinary users,
+		# while a developer may be root in a container.
+		smoke_usermode=""
+		if [ "$(id -u)" != "0" ]; then
+			smoke_usermode="--usermode"
+		fi
+
 		# --allow-untrusted covers the stub package, which is not in any signed
 		# index. The real packages are still checked against the index hash.
 		"$APK_BIN" --root "$root" \
@@ -745,12 +754,14 @@ else
 			--keys-dir /etc/apk/keys \
 			--repositories-file "$WORK/repositories-$smoke_arch.list" \
 			--cache-dir /var/cache/apk \
+			${smoke_usermode:+--usermode} \
 			add --initdb --no-scripts --allow-untrusted "$stub_apk" \
 			opensocks opensocks-minimal luci-app-opensocks >/dev/null
 
 		for pkg in opensocks opensocks-minimal luci-app-opensocks; do
 			"$APK_BIN" --root "$root" --arch "$smoke_arch" --arch noarch \
-				--keys-dir /etc/apk/keys info -e "$pkg" >/dev/null || {
+				--keys-dir /etc/apk/keys ${smoke_usermode:+--usermode} \
+				info -e "$pkg" >/dev/null || {
 				printf 'smoke test failed: %s missing after install for %s\n' \
 					"$pkg" "$smoke_arch" >&2
 				exit 1
