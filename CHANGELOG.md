@@ -13,6 +13,10 @@
 - Fixed the release job dropping the entire apk feed: `gh release create "$RELEASE_DIR"/*` only matches top-level files, so `repo/` was never uploaded. The apk feed is now staged into the flat release asset set (renaming its own `SHA256SUMS` to `apk-SHA256SUMS` to avoid the opkg manifest of the same name).
 - Extended `tools/sync-opkg-release.sh` to publish the apk feed under `<publish-root>/opkg/apk/`, next to the opkg index, so 25.12 clients get it from the same host.
 - Aligned the apk feed URL printed by `tools/build-release.sh` with the published location (`<feed-base>/apk`), which previously pointed at the feed root.
+- Fixed the aarch64 packages never being built: both feed scripts wrote their target list without a trailing newline, and `while IFS= read -r` silently drops a final line that has none, so the last target (`arm64`) was skipped and only `mipsel_24kc` was produced.
+- Fixed dependency lists being comma separated. apk splits dependencies on spaces and treats `,` as a legal name character, so `libc,nftables-json,...` parsed as one impossible package name; the daemon silently got a garbage dependency and the LuCI package failed outright once a version constraint appeared mid-string.
+- Fixed the apk feed never being installable: package signing belongs to `mkpkg` (it is what writes the ADB signature), and `mkndx`/`apk verify` only trust keys loaded through `--keys-dir`, so the public half is now staged for them.
+- Install-tested the feed in a throwaway root on every build, one engine per root because the full and minimal packages conflict by design, with every external dependency stubbed.
 
 ### Shadowsocks engine
 
