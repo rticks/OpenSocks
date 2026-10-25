@@ -32,7 +32,11 @@
 #   src/apk_adb.c        the --info keys are the ADB schema field names
 #                        (name, version, description, arch, license, origin,
 #                        url, maintainer, depends, provides, ...)
-#   src/apk_ctype.c      '|' and ' ' are not valid in a dependency name
+#   src/ctype.c          a dependency list is separated by SPACE and newline
+#                        (APK_CTYPE_DEPENDENCY_SEPARATOR); ',' IS a valid
+#                        dependency-name character. So a comma separated list
+#                        is one long name and mkpkg rejects it. This is why
+#                        every DEPENDS list below is space separated.
 #   src/package.c        apk_dep_parse() has no OR syntax, and OpenWrt adds no
 #                        patch for it, so "a | b" cannot be expressed in apk.
 #   include/package-pack.mk
@@ -573,15 +577,26 @@ for apk in "$@"; do
 done
 set -- "$OUT"/repo/*.apk
 
-if [ -n "$SIGNING_KEY" ]; then
-	# --sign-key is the documented GENERATION option (apk(8)); OpenWrt's
-	# Makefile writes --sign, which only works as a unique-prefix abbreviation.
-	"$APK_BIN" mkndx \
+run_mkndx() {
+	# mkndx writes diagnostics to stderr; keep them for the failure path and for
+	# the pkgname-spec check below, and echo them when it fails so the log says
+	# why instead of only "exit code 1".
+	if "$APK_BIN" mkndx \
 		--output "$OUT/repo/packages.adb" \
 		--description "OpenSocks $VERSION" \
 		--pkgname-spec "$PKGNAME_SPEC" \
-		--sign-key "$SIGNING_KEY" \
-		"$@" 2> "$WORK/mkndx.log"
+		"$@" 2> "$WORK/mkndx.log"; then
+		return 0
+	fi
+	printf 'apk mkndx failed; it said:\n' >&2
+	[ -s "$WORK/mkndx.log" ] && cat "$WORK/mkndx.log" >&2
+	return 1
+}
+
+if [ -n "$SIGNING_KEY" ]; then
+	# --sign-key is the documented GENERATION option (apk(8)); OpenWrt's
+	# Makefile writes --sign, which only works as a unique-prefix abbreviation.
+	run_mkndx --sign-key "$SIGNING_KEY" "$@"
 	cp "$PUBLIC_KEY" "$OUT/repo/opensocks.pem"
 	# The v2-style fingerprint name is kept as an extra alias: opkg's usign key
 	# is named by fingerprint, so an operator copying keys between the two feeds
@@ -594,14 +609,16 @@ else
 	fi
 	printf 'WARNING: no apk signing key supplied; publishing an UNSIGNED packages.adb.\n' >&2
 	printf 'WARNING: 25.12 clients reject it unless run with --allow-untrusted.\n' >&2
-	"$APK_BIN" mkndx \
-		--output "$OUT/repo/packages.adb" \
-		--description "OpenSocks $VERSION" \
-		--pkgname-spec "$PKGNAME_SPEC" \
-		"$@" 2> "$WORK/mkndx.log"
+	run_mkndx "$@"
 fi
 [ -s "$OUT/repo/packages.adb" ] || {
 	printf 'apk mkndx produced no index\n' >&2
+	# mkndx's stderr went to the log file; surface it, otherwise the failure is
+	# just an exit status with no explanation.
+	if [ -s "$WORK/mkndx.log" ]; then
+		printf 'mkndx said:\n' >&2
+		cat "$WORK/mkndx.log" >&2
+	fi
 	exit 1
 }
 gzip -9c "$OUT/repo/packages.adb" > "$OUT/repo/packages.adb.gz"
