@@ -19,7 +19,8 @@
 # Environment:
 #   APK_SIGNING_KEY_FILE   explicit private key path (default <key-dir>/private.pem)
 #   APK_PUBLIC_KEY_FILE    explicit public key path  (default <key-dir>/public.pem)
-#   REQUIRE_SIGNATURE=1    fail (rather than skip) when no key is configured
+#   REQUIRE_SIGNATURE=1    kept for the shared call convention; a key is always
+#                          required here, so this flag no longer changes anything
 #   FEED_BASE              base URL for the download-on-boot binaries
 #   OPENSOCKS_TARGETS      same syntax as build-release.sh
 #   APK_SKIP_VERIFY=1      skip the apk self checks (debugging only)
@@ -137,8 +138,17 @@ if [ -n "$SIGNING_KEY" ] && [ -z "$PUBLIC_KEY" ]; then
 	printf 'apk public key not set; use APK_PUBLIC_KEY_FILE or <key-dir>/public.pem\n' >&2
 	exit 1
 fi
-if [ -z "$SIGNING_KEY" ] && [ "${REQUIRE_SIGNATURE:-0}" = "1" ]; then
+# A key is mandatory in every invocation, not only when REQUIRE_SIGNATURE=1.
+# apk-tools 3 has no way to represent an unsigned repository, so proceeding
+# without one only produces packages that mkndx will reject later (previously
+# this path died on "cp: cannot stat ''" when publishing the public key). Fail
+# here, where the message can name the environment variables. Callers that want
+# to skip the apk feed entirely skip *calling* this script; build-release.sh
+# does exactly that when no key is configured.
+if [ -z "$SIGNING_KEY" ]; then
 	printf 'APK_SIGNING_KEY_FILE is required; refusing to build an unsigned apk repository.\n' >&2
+	printf 'apk-tools 3 cannot index unsigned packages. Set APK_SIGNING_KEY_FILE and\n' >&2
+	printf 'APK_PUBLIC_KEY_FILE (or pass a <key-dir> holding private.pem/public.pem).\n' >&2
 	exit 1
 fi
 
@@ -357,14 +367,15 @@ build_apk() {
 	# mkndx: mkndx only *verifies* the packages it indexes, so it needs the
 	# packages to already carry a signature it can check.
 	#
-	# The caller's remaining arguments (--script TYPE:FILE) stay in "$@" and are
-	# appended after the generated ones.
-	# </dev/null matters: build_apk runs inside "while read ... done < targets.txt",
-	# and a child that reads stdin consumes the target list, silently dropping
-	# every architecture after the first. mkpkg has no reason to read stdin, but
-	# redirecting is the only way to be sure.
-	"$APK_BIN" mkpkg \
-		${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} \
+	# The argv is assembled with set -- instead of inline ${VAR:+...} expansion.
+	# In POSIX sh the quotes INSIDE a ${var:+word} expansion are literal text, so
+	# ${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} is split on whitespace and a key
+	# path such as ".../has space/key.pem" reached mkpkg as two arguments. Every
+	# word below is therefore one literal word, and each "set -- "$@" ..." appends
+	# because "$@" is expanded before set assigns. The caller's remaining
+	# arguments (--script TYPE:FILE ...) are appended in the first set call, so
+	# they keep their own quoting and stay immediately after the generated ones.
+	set -- mkpkg \
 		--info "name:$name" \
 		--info "version:$APK_VERSION" \
 		--info "arch:$arch" \
@@ -374,11 +385,20 @@ build_apk() {
 		--info "maintainer:OpenSocks Developers" \
 		--info "description:$description" \
 		--info "depends:$depends" \
-		${PROVIDES:+--info "provides:$PROVIDES"} \
-		"$@" \
-		--files "$stage" \
-		--output "$out" \
-		--xattrs=no </dev/null
+		"$@"
+	if [ -n "$SIGNING_KEY" ]; then
+		set -- "$@" --sign-key "$SIGNING_KEY"
+	fi
+	if [ -n "$PROVIDES" ]; then
+		set -- "$@" --info "provides:$PROVIDES"
+	fi
+	set -- "$@" --files "$stage" --output "$out" --xattrs=no
+
+	# </dev/null matters: build_apk runs inside "while read ... done < targets.txt",
+	# and a child that reads stdin consumes the target list, silently dropping
+	# every architecture after the first. mkpkg has no reason to read stdin, but
+	# redirecting is the only way to be sure.
+	"$APK_BIN" "$@" </dev/null
 	[ -s "$out" ] || {
 		printf 'apk mkpkg produced no package: %s\n' "$out" >&2
 		exit 1
@@ -634,14 +654,25 @@ run_mkndx() {
 	# mkndx writes diagnostics to stderr; keep them for the failure path and for
 	# the pkgname-spec check below, and echo them when it fails so the log says
 	# why instead of only "exit code 1".
-	if "$APK_BIN" \
-		--keys-dir "$keys_dir" \
-		${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} \
-		mkndx \
+	#
+	# The argv is assembled with set -- for the same reason as build_apk: the
+	# quotes inside ${VAR:+word} are literal, so an inline expansion would split a
+	# key path containing whitespace into separate arguments. mkpkg gets the
+	# applet first; mkndx additionally takes the global --keys-dir and --sign-key
+	# options, which apk's parser accepts before the applet name.
+	# Order matters: "$@" is expanded *before* set reassigns, so every step
+	# below must carry it along. Start from mkndx's own arguments and append the
+	# package list, then prepend the global options in front of the applet name.
+	set -- mkndx \
 		--output "$OUT/repo/packages.adb" \
 		--description "OpenSocks $VERSION" \
 		--pkgname-spec "$PKGNAME_SPEC" \
-		"$@" 2> "$WORK/mkndx.log"; then
+		"$@"
+	if [ -n "$SIGNING_KEY" ]; then
+		set -- --sign-key "$SIGNING_KEY" "$@"
+	fi
+	set -- --keys-dir "$keys_dir" "$@"
+	if "$APK_BIN" "$@" 2> "$WORK/mkndx.log"; then
 		return 0
 	fi
 	printf 'apk mkndx failed; it said:\n' >&2

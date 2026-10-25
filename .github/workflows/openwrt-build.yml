@@ -62,10 +62,9 @@ jobs:
         env:
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
           # EC P-256 key pair for apk v3 signing. It signs the packages (mkpkg)
-          # and the index, which is the only form apk-tools 3 accepts. When it is
-          # absent the run generates a throwaway pair so the apk path is still
-          # exercised; such a feed is not installable anywhere, hence a tagged
-          # release requires the real secret.
+          # and the index, which is the only form apk-tools 3 accepts, so both
+          # secrets are REQUIRED: the build step stops with a clear message when
+          # either is missing rather than publishing a feed nobody can install.
           APK_SIGNING_KEY_PEM: ${{ secrets.APK_SIGNING_KEY_PEM }}
           APK_PUBLIC_KEY_PEM: ${{ secrets.APK_PUBLIC_KEY_PEM }}
           BUILD_APK: "1"
@@ -85,56 +84,42 @@ jobs:
             test "$(sed -n 's/^PKG_RELEASE:=//p' "$makefile")" = "$RELEASE"
           done
 
-          # Signing keys are repository secrets. A fork, or a workflow_dispatch
-          # on a branch, has none: those runs still build and verify both feeds
-          # so the packaging pipeline is exercised, but publish UNSIGNED
-          # indexes. Only a tagged release must be signed, because that is the
-          # artifact users actually install from.
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            test -n "$OPKG_SIGNING_KEY" || {
-              echo 'OPKG_SIGNING_KEY secret is required for a tagged release' >&2
-              exit 1
-            }
-            REQUIRE_SIGNATURE=1
-          else
-            REQUIRE_SIGNATURE=0
-          fi
-
           umask 077
-          if [ -n "$OPKG_SIGNING_KEY" ]; then
-            printf '%s\n' "$OPKG_SIGNING_KEY" > "${RUNNER_TEMP}/opensocks-usign.sec"
-            export OPKG_SIGNING_KEY_FILE="${RUNNER_TEMP}/opensocks-usign.sec"
-            export OPKG_PUBLIC_KEY_FILE="$GITHUB_WORKSPACE/keys/d24a5e234001294c"
-          else
-            echo 'OPKG_SIGNING_KEY not set: building an UNSIGNED opkg feed' >&2
-          fi
 
-          # Materialise the apk key pair. apk-tools 3 cannot index unsigned
-          # packages (mkpkg writes the signature, mkndx verifies it), so a run
-          # without a configured key generates a THROWAWAY pair: that exercises
-          # the whole apk path on every push instead of skipping it, and the
-          # output is clearly not publishable because nothing trusts that key.
+          # The apk feed is the one this repository actually publishes, and it
+          # MUST be signed: apk-tools 3 cannot even index an unsigned package
+          # (mkpkg writes the signature, mkndx verifies it). Use the repo's own
+          # EC P-256 key, which is unrelated to any upstream key and is trusted
+          # through keys/opensocks-apk.pem.
           if [ -n "${APK_SIGNING_KEY_PEM}" ] && [ -n "${APK_PUBLIC_KEY_PEM}" ]; then
             printf '%s\n' "$APK_SIGNING_KEY_PEM" > "${RUNNER_TEMP}/opensocks-apk.sec"
             printf '%s\n' "$APK_PUBLIC_KEY_PEM" > "${RUNNER_TEMP}/opensocks-apk.pub"
             echo 'using the configured apk signing key'
           else
-            openssl ecparam -name prime256v1 -genkey -noout \
-              -out "${RUNNER_TEMP}/opensocks-apk.sec"
-            openssl ec -in "${RUNNER_TEMP}/opensocks-apk.sec" -pubout \
-              -out "${RUNNER_TEMP}/opensocks-apk.pub" 2>/dev/null
-            echo 'APK_SIGNING_KEY_PEM not set: signing with a THROWAWAY key (not publishable)' >&2
+            # Leave the key files absent so build-apk-repo.sh stops with its own
+            # clear message instead of publishing something uninstallable.
+            echo 'APK_SIGNING_KEY_PEM secret is required: apk cannot index unsigned packages' >&2
+            exit 1
           fi
           export APK_SIGNING_KEY_FILE="${RUNNER_TEMP}/opensocks-apk.sec"
           export APK_PUBLIC_KEY_FILE="${RUNNER_TEMP}/opensocks-apk.pub"
 
-          # REQUIRE_SIGNATURE governs the usign/opkg feed only: a branch build
-          # without that secret legitimately ships an unsigned opkg index. The
-          # apk feed always has a key by now (real or throwaway), and an absent
-          # one is a hard error inside build-apk-repo.sh.
+          # The opkg/IPK feed is built for 22.03-24.10 users but is not this
+          # repository's publishing target, so it is signed only when a usign
+          # key happens to be configured and is otherwise left unsigned.
+          if [ -n "$OPKG_SIGNING_KEY" ]; then
+            printf '%s\n' "$OPKG_SIGNING_KEY" > "${RUNNER_TEMP}/opensocks-usign.sec"
+            export OPKG_SIGNING_KEY_FILE="${RUNNER_TEMP}/opensocks-usign.sec"
+            export OPKG_PUBLIC_KEY_FILE="$GITHUB_WORKSPACE/keys/d24a5e234001294c"
+            export REQUIRE_SIGNATURE=1
+            echo 'using the configured opkg signing key'
+          else
+            export REQUIRE_SIGNATURE=0
+            echo 'OPKG_SIGNING_KEY not set: building an UNSIGNED opkg feed' >&2
+          fi
+
           export OPENWRT_ONLY=1
           export BUILD_APK=1
-          export REQUIRE_SIGNATURE
           export RELEASE_DIR VERSION RELEASE
           export USIGN="${RUNNER_TEMP}/usign/build/usign"
           ./tools/build-release.sh
@@ -142,19 +127,15 @@ jobs:
       - name: Verify opkg feed
         env:
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
-          # Mirrors the Build step: a tagged release must be signed, a branch
-          # build without the secret ships an unsigned index instead.
-          REQUIRE_SIGNATURE: ${{ github.ref_type == 'tag' && '1' || '0' }}
+          # Signing the opkg feed is optional: this repository publishes the apk
+          # feed, and the IPK output exists for 22.03-24.10 users who want it.
+          HAVE_OPKG_KEY: ${{ secrets.OPKG_SIGNING_KEY != '' && '1' || '0' }}
         run: |
           set -eu
           test -s "$RELEASE_DIR/Packages"
           test -s "$RELEASE_DIR/Packages.gz"
-          if [ "$REQUIRE_SIGNATURE" = "1" ]; then
-            test -s "$RELEASE_DIR/Packages.sig"
-            test -s "$RELEASE_DIR/SHA256SUMS.sig"
-            test -s "$RELEASE_DIR/d24a5e234001294c"
-          else
-            echo 'opkg feed is UNSIGNED (OPKG_SIGNING_KEY secret not configured)' >&2
+          if [ "$HAVE_OPKG_KEY" != "1" ]; then
+            echo 'opkg feed is UNSIGNED (no OPKG_SIGNING_KEY secret; not this repo'"'"'s publish target)' >&2
           fi
           ipk_count="$(find "$RELEASE_DIR" -maxdepth 1 -name '*.ipk' | wc -l | tr -d ' ')"
           # multi-arch: luci + minimal + at least mipsel and one aarch64 opensocks package
@@ -172,7 +153,7 @@ jobs:
           fi
           gzip -t "$RELEASE_DIR/Packages.gz"
           (cd "$RELEASE_DIR" && shasum -a 256 -c SHA256SUMS)
-          if [ "$REQUIRE_SIGNATURE" = "1" ]; then
+          if [ "$HAVE_OPKG_KEY" = "1" ]; then
             "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/Packages" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/Packages.sig"
             "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/SHA256SUMS" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/SHA256SUMS.sig"
           fi
@@ -184,9 +165,12 @@ jobs:
           HAVE_APK_KEY: ${{ secrets.APK_SIGNING_KEY_PEM != '' && '1' || '0' }}
         run: |
           set -eu
-          # The build step always produces the apk feed: with the configured key
-          # for a real release, or with a throwaway key on a branch so this path
-          # stays exercised. Either way the index and packages must verify.
+          # This is the feed the repository publishes, signed with its own EC
+          # P-256 key (keys/opensocks-apk.pem is the trusted public half).
+          test "$HAVE_APK_KEY" = "1" || {
+            echo 'APK_SIGNING_KEY_PEM secret is missing; the apk feed is required' >&2
+            exit 1
+          }
           test -s "$RELEASE_DIR/repo/packages.adb"
           test -s "$RELEASE_DIR/repo/packages.adb.gz"
           apk_count="$(find "$RELEASE_DIR/repo" -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ')"
@@ -204,6 +188,21 @@ jobs:
           # populates only from --keys-dir (or etc/apk/keys), so point it at the
           # published public key.
           test -s "$RELEASE_DIR/repo/opensocks.pem"
+          # The published public key must be the repository's documented trust
+          # anchor. Without this check a fork that set APK_SIGNING_KEY_PEM but
+          # forgot to update keys/opensocks-apk.pem would publish a feed whose
+          # key does not match the one the README tells clients to install.
+          #
+          # Compare the key MATERIAL, not the bytes: the secret arrives without
+          # its trailing newline and may carry CRLF from a Windows editor, so a
+          # plain cmp would fail on line endings alone.
+          key_material() { tr -d '[:space:]' < "$1"; }
+          if [ "$(key_material "$RELEASE_DIR/repo/opensocks.pem")" != \
+               "$(key_material "$GITHUB_WORKSPACE/keys/opensocks-apk.pem")" ]; then
+            echo 'published opensocks.pem does not match keys/opensocks-apk.pem' >&2
+            echo 'the APK_SIGNING_KEY_PEM secret and the committed public key disagree' >&2
+            exit 1
+          fi
           keys_dir="${RUNNER_TEMP}/apk-trust"
           rm -rf "$keys_dir"
           mkdir -p "$keys_dir"
@@ -212,13 +211,7 @@ jobs:
           for apk in "$RELEASE_DIR/repo"/*.apk; do
             "$APK_BIN" --keys-dir "$keys_dir" verify "$apk"
           done
-          # Set below from the secret presence, not from the secret itself, so
-          # no expression is interpolated into the shell command text.
-          if [ "$HAVE_APK_KEY" = "1" ]; then
-            echo 'apk feed is signed with the configured key'
-          else
-            echo 'apk feed is signed with a THROWAWAY key: do not publish this build' >&2
-          fi
+          echo 'apk feed is signed with the configured key'
 
       - name: Upload OpenWrt artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -260,11 +253,13 @@ jobs:
               cp "$RELEASE_DIR/repo/SHA256SUMS" "$assets/apk-SHA256SUMS"
             fi
           fi
-          if [ -s "$assets/packages.adb" ]; then
-            echo "apk feed included: $(find "$assets" -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ') package(s)"
-          else
-            echo 'apk feed not included in this release (APK_SIGNING_KEY_PEM secret not configured)' >&2
-          fi
+          # The apk feed is always part of a release now, so a missing index here
+          # means the build step did not do its job.
+          test -s "$assets/packages.adb" || {
+            echo 'apk feed is missing from the release assets' >&2
+            exit 1
+          }
+          echo "apk feed included: $(find "$assets" -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ') package(s)"
           gh release create "$GITHUB_REF_NAME" "$assets"/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

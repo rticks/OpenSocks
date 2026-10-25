@@ -17,6 +17,10 @@
 - Fixed dependency lists being comma separated. apk splits dependencies on spaces and treats `,` as a legal name character, so `libc,nftables-json,...` parsed as one impossible package name; the daemon silently got a garbage dependency and the LuCI package failed outright once a version constraint appeared mid-string.
 - Fixed the apk feed never being installable: package signing belongs to `mkpkg` (it is what writes the ADB signature), and `mkndx`/`apk verify` only trust keys loaded through `--keys-dir`, so the public half is now staged for them.
 - Install-tested the feed in a throwaway root on every build, one engine per root because the full and minimal packages conflict by design, with every external dependency stubbed.
+- Assembled the `mkpkg` and `mkndx` argument vectors with `set --` instead of inline `${VAR:+word}` expansion. In POSIX sh the quotes inside that expansion are literal, so a signing-key path containing whitespace was split into two arguments and reached apk as a malformed `--sign-key`.
+- Made the apk signing key mandatory in `tools/build-apk-repo.sh` itself rather than only when `REQUIRE_SIGNATURE=1`: without a key the script used to continue and die on `cp: cannot stat ''` while publishing the public key. It now stops up front and names the variables to set.
+- Made the repository's own apk key the publishing target. `keys/opensocks-apk.pem` is the committed public half (an EC P-256 key independent of any upstream key), GitHub Actions reads the matching secret from `APK_SIGNING_KEY_PEM`/`APK_PUBLIC_KEY_PEM`, and a build without it fails instead of publishing an uninstallable feed. CI also compares the published `opensocks.pem` against the committed anchor so a secret/anchor mismatch cannot ship.
+- Made the opkg/IPK feed explicitly optional for this fork: it is still built and verified, but it is signed only when an `OPKG_SIGNING_KEY` secret exists. The apk feed is the one this repository publishes.
 
 ### Shadowsocks engine
 
