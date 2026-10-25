@@ -805,8 +805,11 @@ luci-base luci-compat luci-lua-runtime curl"
 			}
 
 			for pkg in $install_set; do
+				# info only reads the database, and --usermode is a creation-time
+				# option ("unrecognized option 'usermode'" here), so it is
+				# omitted from the query.
 				"$APK_BIN" --root "$inc_root" $smoke_arch_args \
-					--keys-dir /etc/apk/keys ${smoke_usermode:+--usermode} \
+					--keys-dir /etc/apk/keys \
 					info -e "$pkg" >/dev/null || {
 					printf 'smoke test failed: %s missing after install for %s\n' \
 						"$pkg" "$smoke_arch" >&2
