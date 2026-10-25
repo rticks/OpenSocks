@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1
+
+### OpenWrt 25.12 fixes for the minimal package
+
+- Fixed `opensocks-minimal` never starting on a router that reports only `mips`. The byte-order probe used `od`, which OpenWrt's stock BusyBox does not ship (`od: not found`), so detection failed and the launcher exited with "OpenSocks does not support CPU architecture: mips". It now reads the same ELF byte with `hexdump`, which is present by default.
+- Fixed the download-on-boot URL. It was hardcoded to the `rel.n4t.su` mirror, which still publishes 0.2.13, so every 0.3.0 URL returned 404 and the daemon was never fetched — LuCI reported "daemon unreachable". The URL is now generated at build time from `BINARY_BASE` plus `OPENSOCKS_BINARY_LAYOUT` (`flat` for a GitHub Release, `by-sha` for the mirror), and CI points it at the release that ships the archive.
+- Stopped the launcher retrying forever. It now makes five attempts, logs why each one failed (HTTP error, checksum mismatch, not a gzip), and exits non-zero so procd can apply its own backoff instead of leaving the service looking active with the API closed.
+- Accepted either URL layout in the launcher and pinned the file name to the current CPU, so a tampered `binary_url` cannot point at a binary for another architecture.
+- Made the `usign` metadata refresh a no-op where opkg does not exist, instead of failing on the missing `/etc/opkg/keys` path.
+- Added `openwrt/opensocks-minimal/tests/architecture_test.sh`: 27 cases across the launcher and both generated post-install scripts, run in CI with `od` removed and `hexdump` required.
+- Added a release-time check that fetches the daemon URL baked into the published minimal package and fails the build if it does not resolve.
+
 ## 0.3.0
 
 ### OpenWrt 25.12 / apk
