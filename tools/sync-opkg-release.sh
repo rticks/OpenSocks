@@ -39,20 +39,46 @@ esac
 
 command -v curl >/dev/null
 command -v jq >/dev/null
-test -x "$usign_bin"
+# usign is only needed to verify a SIGNED opkg feed. A fork that does not own the
+# upstream key publishes an unsigned opkg index, and must still be able to sync
+# the apk feed, so the binary is not a hard requirement here; the branches below
+# check it before actually invoking it.
+if [ -n "${REQUIRE_USIGN:-0}" ] && [ "${REQUIRE_USIGN}" = "1" ]; then
+	test -x "$usign_bin"
+fi
 
 stage="$(mktemp -d "$publish_root/.opkg-${tag}.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT INT TERM
 base="https://github.com/$repository/releases/download/$tag"
 cache_bust="$(date -u +%s)"
-metadata_assets="Packages Packages.gz Packages.sig SHA256SUMS SHA256SUMS.sig d24a5e234001294c"
+
+# Packages/Packages.gz and SHA256SUMS are always published. The usign signature
+# and the key file are not: a fork that does not own the upstream opkg key mints
+# an UNSIGNED opkg feed, and the release then simply has no Packages.sig. The apk
+# feed is what such a repository publishes, so a missing usign signature must not
+# block the whole sync.
+metadata_assets="Packages Packages.gz SHA256SUMS"
 
 for asset in $metadata_assets; do
 	curl -fL --retry 3 --connect-timeout 15 -o "$stage/$asset" "$base/$asset?cache=$cache_bust"
 done
 
-test "$("$usign_bin" -F -p "$stage/$public_key_fingerprint")" = "$public_key_fingerprint"
-"$usign_bin" -V -m "$stage/Packages" -p "$stage/$public_key_fingerprint" -x "$stage/Packages.sig"
+opkg_signed=no
+if curl -fsL --retry 3 --connect-timeout 15 \
+	-o "$stage/Packages.sig" "$base/Packages.sig?cache=$cache_bust" &&
+	curl -fsL --retry 3 --connect-timeout 15 \
+		-o "$stage/$public_key_fingerprint" \
+		"$base/$public_key_fingerprint?cache=$cache_bust"; then
+	opkg_signed=yes
+else
+	rm -f "$stage/Packages.sig" "$stage/$public_key_fingerprint"
+	printf 'opkg feed is UNSIGNED (no Packages.sig in this release); publishing it as-is\n' >&2
+fi
+
+if [ "$opkg_signed" = yes ]; then
+	test "$("$usign_bin" -F -p "$stage/$public_key_fingerprint")" = "$public_key_fingerprint"
+	"$usign_bin" -V -m "$stage/Packages" -p "$stage/$public_key_fingerprint" -x "$stage/Packages.sig"
+fi
 
 # Collect every Filename basenames referenced by the signed Packages index.
 package_assets="$(
@@ -103,7 +129,17 @@ while IFS= read -r asset; do
 done < "$stage/.asset-list"
 rm -f "$stage/.asset-list"
 
-"$usign_bin" -V -m "$stage/SHA256SUMS" -p "$stage/$public_key_fingerprint" -x "$stage/SHA256SUMS.sig"
+if [ "$opkg_signed" = yes ]; then
+	if curl -fsL --retry 3 --connect-timeout 15 \
+		-o "$stage/SHA256SUMS.sig" "$base/SHA256SUMS.sig?cache=$cache_bust"; then
+		"$usign_bin" -V -m "$stage/SHA256SUMS" \
+			-p "$stage/$public_key_fingerprint" -x "$stage/SHA256SUMS.sig"
+	else
+		rm -f "$stage/SHA256SUMS.sig"
+	fi
+fi
+# The manifest itself is checked in every case; the signature above proves the
+# manifest is the one the release produced.
 (cd "$stage" && sha256sum -c SHA256SUMS)
 gzip -t "$stage/Packages.gz"
 
