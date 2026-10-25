@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0
+
+### OpenWrt 25.12 / apk
+
+- Added OpenWrt 25.12 support, where apk replaced opkg and packages use the `.apk` (APKv3) format.
+- Published a signed apk repository (`packages.adb`) from the same release build that produces the opkg feed, so 22.03-24.10 and 25.12+ stay in lockstep.
+- Signed the index and packages with an EC P-256 key, using the same scheme OpenWrt itself uses.
+- Reported `noarch` for the minimal launcher and the LuCI app, and the real architecture (`mipsel_24kc`, `aarch64_cortex-a53`, ...) for the daemon.
+- Kept `kmod-nft-tproxy` as a dependency for the UDP TPROXY path; it is resolved from the per-target kmods feed like any OpenWrt kernel module dependency.
+- Verified every build by installing the feed into a throwaway root for one `noarch` and one real architecture before publishing.
+- Fixed the release job dropping the entire apk feed: `gh release create "$RELEASE_DIR"/*` only matches top-level files, so `repo/` was never uploaded. The apk feed is now staged into the flat release asset set (renaming its own `SHA256SUMS` to `apk-SHA256SUMS` to avoid the opkg manifest of the same name).
+- Extended `tools/sync-opkg-release.sh` to publish the apk feed under `<publish-root>/opkg/apk/`, next to the opkg index, so 25.12 clients get it from the same host.
+- Aligned the apk feed URL printed by `tools/build-release.sh` with the published location (`<feed-base>/apk`), which previously pointed at the feed root.
+
+### Shadowsocks engine
+
+- Fixed `upstreamFromBoot` leaving whitespace-padded `Method` values and empty methods untouched. It now trims `Method` and falls back to the default cipher, so a padded line from the API no longer fails cipher resolution.
+- Removed the `shadowsocks-libev` dependency: 25.12 no longer ships `ss-redir`/`ss-local`, so the engine is now compiled into the single Go daemon.
+- Implemented TCP REDIRECT, UDP TPROXY, and SOCKS5 in-process, with AEAD and stream ciphers.
+- Reduced the dependency set to `libc`, `nftables-json`, `kmod-nft-tproxy`, `ca-bundle`, and `uci`.
+- Kept runtime state in `/etc/opensocks` and scratch data in `/tmp/opensocks`; the former `engine.yaml` configuration file is gone.
+- Terminated `ss-redir`/`ss-local` children left behind by an upgrade so no stale helper keeps a port open.
+
+### LuCI
+
+- Kept the LuCI application on the Lua MVC (`luasrc/`); it is not ported to ucode yet, so `luci-compat` and `luci-lua-runtime` remain runtime dependencies.
+- Declared `curl` as a dependency in both feeds: the controller proxies to the daemon by shelling out to `/usr/bin/curl`, so it was already required but previously undeclared.
+- Confirmed `luci-base`, `luci-compat`, `luci-lua-runtime`, and `curl` are all present in the 25.12 LuCI feed.
+
 ## 0.2.13
 
 ### OpenWrt platforms

@@ -4,8 +4,9 @@
 
 ```
 openwrt/
-├── opensocks/          デーモン + 軽量 ss-redir/nftables エンジン
-└── luci-app-opensocks/ LuCI Web ダッシュ (ステータス・ログイン・Free回線選択)
+├── opensocks/           デーモン (Shadowsocks エンジン内蔵) + nftables
+├── opensocks-minimal/   ダウンロード起動型の最小ランチャー
+└── luci-app-opensocks/  LuCI Web ダッシュ (ステータス・ログイン・Free回線選択)
 ```
 
 ## 機能
@@ -13,7 +14,8 @@ openwrt/
 - **ログイン**: メール/電話/ユーザー名 + パスワード。セッション切れ時は保存済み認証情報で自動再ログイン
 - **Free サーバー**: ログイン不要のデバイス登録 (`registerByDevice`) で無料回線へ接続可能。
   `free_only` 設定で無料回線のみ表示
-- **エンジン**: 約100KBの `shadowsocks-libev-ss-redir`。mihomoは使用しない
+- **エンジン**: Shadowsocks のデータプレーン (TCP REDIRECT・UDP TPROXY・SOCKS5) をGoデーモンに内蔵。
+  外部の `ss-redir` / `ss-local` / mihomo は不要 (OpenWrt 25.12 では `shadowsocks-libev` 自体が配布されません)
 - **モード**: smart (中国CIDR→PROXY / 他→DIRECT) または全TCP通信の中国プロキシ経由
 - **Web ダッシュ操作**: 接続、ping順ソート、履歴確認、履歴からの再接続
 - **ワンタップ構成**: LANブリッジを自動検出し、smartまたは全TCP通信のプロキシ経由を即時構成
@@ -46,11 +48,26 @@ CGO_ENABLED=0 go build -o opensocks .   # ホスト環境でビルド
 
 ## インストール後
 
+OpenWrt 22.03–24.10 (opkg):
+
 ```bash
-opkg update && opkg install shadowsocks-libev-ss-redir nftables-json opensocks luci-app-opensocks
+opkg update && opkg install nftables-json opensocks luci-app-opensocks
 /etc/init.d/opensocks enable
 /etc/init.d/opensocks start
 ```
+
+OpenWrt 25.12 以降 (apk):
+
+```bash
+wget -O /etc/apk/keys/opensocks.pem https://rel.n4t.su/opkg/apk/opensocks.pem
+echo 'https://rel.n4t.su/opkg/apk/packages.adb' >> /etc/apk/repositories.d/customfeeds.list
+apk update && apk add opensocks luci-app-opensocks
+/etc/init.d/opensocks enable
+/etc/init.d/opensocks start
+```
+
+`shadowsocks-libev-ss-redir` は依存から外れました。エンジンはデーモンに内蔵されているため、
+追加インストールは不要です。
 
 LuCI HTTPSを設定してから、ブラウザで
 `https://<router>/cgi-bin/luci/admin/services/opensocks` を開く。
@@ -78,13 +95,16 @@ id=-1)。無料回線はアカウント不要で、端末登録 API (`/api/1/app
 
 ### なぜ mihomo を使わない?
 
-RAM 120MBの実機ではmihomoがルーター全体を不安定化したためです。現在はAPIが返すSS接続に必要な
-`ss-redir`だけを使い、中国CIDRリストをnftablesのinterval setへ読み込みます。実機RSSは
-OpenSocks約11.6MB + ss-redir約1.4MBでした。TCPはREDIRECT、UDPはTPROXYで中国経路へ送り、
-王者荣耀のPVP通信も含めて処理します。Trojan/GTS/TUNには未対応です。
+RAM 120MBの実機ではmihomoがルーター全体を不安定化したためです。現在はAPIが返すSS接続を
+デーモン内蔵のShadowsocksエンジンで直接処理し、中国CIDRリストをnftablesのinterval setへ
+読み込みます。TCPはREDIRECT、UDPはTPROXYで中国経路へ送り、王者荣耀のPVP通信も含めて処理します。
+Trojan/GTS/TUNには未対応です。
 
-容量が限られる機種向けには`opensocks-minimal`も用意しています。このIPKはランチャーだけを
-overlayへ保存し、署名済みリリースの`opensocks-linux-mipsle.gz`をSHA-256検証して`/tmp`へ展開します。
+外部プロセスを持たないため、以前の `ss-redir` (約1.4MB) は不要になりました。デーモン単体で
+TCP/UDP双方を処理するので、プロセス間の受け渡しも再起動時の孤児プロセスも発生しません。
+
+容量が限られる機種向けには`opensocks-minimal`も用意しています。このパッケージはランチャーだけを
+overlayへ保存し、署名済みリリースの`opensocks-linux-<arch>.gz`をSHA-256検証して`/tmp`へ展開します。
 実行ファイルは再起動時に再取得しますが、UCI設定は`/etc/config/opensocks`、暗号化済み認証情報・
 履歴・通信統計は`/etc/opensocks`に残るため失われません。
 
@@ -95,10 +115,17 @@ overlayへ保存し、署名済みリリースの`opensocks-linux-mipsle.gz`をS
 ## マルチアーキテクチャ release
 
 `tools/build-release.sh` は複数 GOARCH の daemon をビルドできます（既定: `mipsle` と `arm64`）。
+同じリリースから opkg フィード (22.03–24.10) と apk フィード (25.12+) の両方を生成します。
 
 - 完全版 IPK: `opensocks_*_<opkg-arch>.ipk`（同一 arm64 バイナリを `aarch64_cortex-a53` と `aarch64_cortex-a53_neon-vfpv4` の両方に梱包）
+- 完全版 apk: `repo/opensocks-<version>-r<release>-<apk-arch>.apk`
+- apk インデックス: `repo/packages.adb`（署名鍵があるときは `repo/opensocks.pem` も）
 - ブート用バイナリ: `opensocks-linux-mipsle.gz` / `opensocks-linux-arm64.gz`
-- `opensocks-minimal` は `Architecture: all` のまま、実行時に `uname -m` で対応バイナリを選択
+- `opensocks-minimal` は IPK が `Architecture: all`、apk が `noarch`。実行時に `uname -m` で対応バイナリを選択
+
+apk 側のツールは `tools/build-apk-tool.sh` が OpenWrt 25.12 と同じ apk-tools 3.0.5 をビルドします。
+apk バイナリが見つからない場合、apk フィードの生成はスキップされ opkg フィードだけが出ます
+（`BUILD_APK=1` を指定すると不足はエラーになります）。
 
 追加ターゲット例:
 
@@ -108,4 +135,4 @@ OPENSOCKS_TARGETS='mipsle:softfloat mipsle mipsel_24kc;arm64 arm64 aarch64_corte
 
 ## ライセンス
 
-GPL-3.0 (mihomo / clash エコシステムとの整合性のため)。
+GPL-3.0。
