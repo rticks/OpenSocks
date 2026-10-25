@@ -200,9 +200,18 @@ jobs:
             echo 'apk feed contains an opkg-only vendor arch alias' >&2
             exit 1
           fi
-          "$APK_BIN" verify "$RELEASE_DIR/repo/packages.adb"
-          for apk in "$RELEASE_DIR/repo"/*.apk; do "$APK_BIN" verify "$apk"; done
+          # verify resolves signatures against trust->trusted_key_list, which apk
+          # populates only from --keys-dir (or etc/apk/keys), so point it at the
+          # published public key.
           test -s "$RELEASE_DIR/repo/opensocks.pem"
+          keys_dir="${RUNNER_TEMP}/apk-trust"
+          rm -rf "$keys_dir"
+          mkdir -p "$keys_dir"
+          cp "$RELEASE_DIR/repo/opensocks.pem" "$keys_dir/opensocks.pem"
+          "$APK_BIN" --keys-dir "$keys_dir" verify "$RELEASE_DIR/repo/packages.adb"
+          for apk in "$RELEASE_DIR/repo"/*.apk; do
+            "$APK_BIN" --keys-dir "$keys_dir" verify "$apk"
+          done
           # Set below from the secret presence, not from the secret itself, so
           # no expression is interpolated into the shell command text.
           if [ "$HAVE_APK_KEY" = "1" ]; then
