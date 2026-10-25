@@ -8,6 +8,27 @@ OUT="${RELEASE_DIR:-$ROOT/../release/$VERSION}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 FEED_BASE="${FEED_BASE:-https://rel.n4t.su/opkg}"
+# Where the download-on-boot daemon archives live.
+#
+#   flat   <BINARY_BASE>/opensocks-linux-<suffix>.gz
+#          A GitHub Release serves exactly this layout.
+#   by-sha <BINARY_BASE>/by-sha/<sha256>/opensocks-linux-<suffix>.gz
+#          Content addressed, so a CDN may cache it forever.
+#
+# The default is flat because that is what a release download looks like, and
+# the minimal package's launcher verifies the archive against the SHA-256 baked
+# into UCI either way. Set OPENSOCKS_BINARY_LAYOUT=by-sha for the mirror.
+BINARY_BASE="${BINARY_BASE:-$FEED_BASE}"
+BINARY_LAYOUT="${OPENSOCKS_BINARY_LAYOUT:-flat}"
+
+binary_url() {
+	sha="$1"
+	gz="$2"
+	case "$BINARY_LAYOUT" in
+	by-sha) printf '%s/by-sha/%s/%s\n' "$BINARY_BASE" "$sha" "$gz" ;;
+	*) printf '%s/%s\n' "$BINARY_BASE" "$gz" ;;
+	esac
+}
 
 mkdir -p "$OUT"
 rm -f "$OUT"/*
@@ -138,7 +159,7 @@ if [ ! -f "$WORK/sha-$default_suffix" ]; then
 fi
 default_sha="$(cat "$WORK/sha-$default_suffix")"
 default_gz="opensocks-linux-${default_suffix}.gz"
-default_url="${BINARY_URL:-$FEED_BASE/by-sha/$default_sha/$default_gz}"
+default_url="${BINARY_URL:-$(binary_url "$default_sha" "$default_gz")}"
 
 arch_control_extra=""
 arch_postinst_case=""
@@ -146,7 +167,7 @@ while IFS= read -r suffix; do
 	[ -n "$suffix" ] || continue
 	sha="$(cat "$WORK/sha-$suffix")"
 	gz="opensocks-linux-${suffix}.gz"
-	url="$FEED_BASE/by-sha/$sha/$gz"
+	url="$(binary_url "$sha" "$gz")"
 	arch_control_extra="${arch_control_extra}X-OpenSocks-Binary-SHA256-${suffix}: ${sha}
 X-OpenSocks-Binary-URL-${suffix}: ${url}
 "
@@ -227,6 +248,7 @@ cp "$ROOT/openwrt/opensocks-minimal/files/usr/lib/opensocks/launcher.sh" "$minim
 sed \
 	-e "s|@BINARY_SHA256@|$default_sha|g" \
 	-e "s|@BINARY_NAME@|$default_gz|g" \
+	-e "s|@BINARY_URL@|$default_url|g" \
 	"$ROOT/openwrt/opensocks-minimal/files/etc/config/opensocks" > "$minimal_data/etc/config/opensocks"
 chmod 0755 "$minimal_control/postinst" "$minimal_data/etc/init.d/opensocks" "$minimal_data/usr/lib/opensocks/launcher.sh"
 build_ipk opensocks-minimal all "$minimal_control" "$minimal_data"

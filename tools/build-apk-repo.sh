@@ -92,6 +92,22 @@ KEY_DIR="${5:-}"
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 FEED_BASE="${FEED_BASE:-https://rel.n4t.su/opkg}"
+# Where the download-on-boot daemon archives live. Must match
+# tools/build-release.sh: "flat" is a plain release download layout, "by-sha" is
+# the content-addressed mirror layout. The launcher verifies the archive against
+# the SHA-256 baked into UCI, so the layout only decides the path.
+BINARY_BASE="${BINARY_BASE:-$FEED_BASE}"
+BINARY_LAYOUT="${OPENSOCKS_BINARY_LAYOUT:-flat}"
+
+binary_url() {
+	sha="$1"
+	gz="$2"
+	case "$BINARY_LAYOUT" in
+	by-sha) printf '%s/by-sha/%s/%s\n' "$BINARY_BASE" "$sha" "$gz" ;;
+	*) printf '%s/%s\n' "$BINARY_BASE" "$gz" ;;
+	esac
+}
+
 # OpenWrt's PKG_RELEASE maps to the apk -r<number> build component. Using
 # <version>-r<release> keeps the two feeds describing the same build, and is a
 # valid apk version (number{.number}{letter}{_suffix}{-r#}).
@@ -458,7 +474,7 @@ while IFS= read -r target; do
 		arch_case="${arch_case}
 	${suffix})
 		_sha='${sha}'
-		_url='${FEED_BASE}/by-sha/${sha}/${gz}'
+		_url='$(binary_url "$sha" "$gz")'
 		;;"
 		sha_file="$WORK/sha-$suffix"
 		printf '%s\n' "$sha" > "$sha_file"
@@ -515,12 +531,14 @@ install_file "$ROOT/openwrt/opensocks-minimal/files/etc/init.d/opensocks" \
 	"$minimal_stage/etc/init.d/opensocks" 0755
 install_file "$ROOT/openwrt/opensocks-minimal/files/usr/lib/opensocks/launcher.sh" \
 	"$minimal_stage/usr/lib/opensocks/launcher.sh" 0755
-# The UCI defaults carry @BINARY_SHA256@/@BINARY_NAME@ placeholders.
+# The UCI defaults carry the placeholders the post-install expects.
 mkdir -p "$minimal_stage/etc/config"
 default_sha="$(cat "$WORK/sha-$default_suffix")"
+default_url="$(binary_url "$default_sha" "$default_gz")"
 sed \
 	-e "s|@BINARY_SHA256@|${default_sha}|g" \
 	-e "s|@BINARY_NAME@|${default_gz}|g" \
+	-e "s|@BINARY_URL@|${default_url}|g" \
 	"$ROOT/openwrt/opensocks-minimal/files/etc/config/opensocks" \
 	> "$minimal_stage/etc/config/opensocks"
 chmod 0644 "$minimal_stage/etc/config/opensocks"

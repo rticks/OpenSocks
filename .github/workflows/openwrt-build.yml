@@ -136,6 +136,22 @@ jobs:
             echo 'OPKG_SIGNING_KEY not set: building an UNSIGNED opkg feed' >&2
           fi
 
+          # The minimal package carries no daemon: its launcher downloads one at
+          # start. Point that download at THIS release's assets on GitHub, so the
+          # package is usable the moment it is published -- no separate mirror
+          # sync step has to have run first. The layout is "flat" because a
+          # GitHub Release serves assets at the top level of its download URL.
+          #
+          # For a release the tag is the ref itself; for a branch run there is no
+          # release, so the assets are only reachable from the uploaded artifact.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            export BINARY_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          else
+            export BINARY_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          fi
+          export OPENSOCKS_BINARY_LAYOUT=flat
+          echo "daemon download base: $BINARY_BASE"
+
           export OPENWRT_ONLY=1
           export BUILD_APK=1
           export RELEASE_DIR VERSION RELEASE
@@ -231,6 +247,28 @@ jobs:
           done
           echo 'apk feed is signed with the configured key'
 
+          # The minimal package ships no daemon, so an unusable binary_url makes
+          # it dead on arrival ("daemon unreachable" in LuCI). Assert that the
+          # URL baked into it names this release's asset and is actually served.
+          minimal_apk="$(find "$RELEASE_DIR/repo" -maxdepth 1 -name 'opensocks-minimal-*-noarch.apk' | head -n 1)"
+          binary_url="$("$APK_BIN" adbdump "$minimal_apk" 2>/dev/null |
+            grep -oE 'https?://[^"[:space:]]+opensocks-linux-[a-z0-9]+\.gz' | head -n 1)"
+          test -n "$binary_url" || {
+            echo "could not read binary_url from $minimal_apk" >&2
+            exit 1
+          }
+          echo "minimal binary_url: $binary_url"
+          case "$binary_url" in
+          https://github.com/*/releases/download/*) ;;
+          *)
+            echo "binary_url does not point at a GitHub release asset: $binary_url" >&2
+            exit 1
+            ;;
+          esac
+          # Downloadability is checked AFTER publishing (see the release step):
+          # at this point the release's assets do not exist yet even on a tag, so
+          # fetching the URL here would always 404.
+
       - name: Upload OpenWrt artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -283,3 +321,26 @@ jobs:
             --verify-tag \
             --title "OpenSocks ${GITHUB_REF_NAME#v}" \
             --notes-file "${RUNNER_TEMP}/release-notes.md"
+
+          # Now that the assets exist, prove the daemon URL baked into the
+          # minimal package is actually downloadable. This is the check that
+          # would have caught the "daemon unreachable" report: the package
+          # shipped a URL for a release whose assets were never published.
+          binary_url="$(grep -oE 'https?://[^"[:space:]]+opensocks-linux-[a-z0-9]+\.gz' \
+            "$RELEASE_DIR/repo"/*minimal*.apk 2>/dev/null | head -n 1 || true)"
+          if [ -z "$binary_url" ]; then
+            binary_url="$(curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Packages" |
+              sed -n 's/^X-OpenSocks-Binary-URL: //p' | head -n 1)"
+          fi
+          test -n "$binary_url" || {
+            echo 'could not determine the minimal package daemon URL' >&2
+            exit 1
+          }
+          echo "checking daemon URL: $binary_url"
+          curl -fsSIL --retry 3 --max-time 45 "$binary_url" >/dev/null || {
+            echo "the published minimal package points at an unreachable URL:" >&2
+            echo "  $binary_url" >&2
+            echo 'installed routers would fail with "daemon unreachable"' >&2
+            exit 1
+          }
+          echo 'minimal daemon URL is downloadable'

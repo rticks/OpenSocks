@@ -1,11 +1,39 @@
 #!/bin/sh
+# Download-on-boot launcher for the OpenSocks daemon.
+#
+# The package ships no daemon binary; it carries the expected URL and SHA-256 in
+# UCI (written by the package's post-install) and fetches the binary on start.
+# That keeps the installed footprint small, which is the whole point of the
+# "minimal" variant.
+#
+# Two URL layouts are accepted:
+#
+#   <base>/opensocks-linux-<suffix>.gz               flat (GitHub Releases)
+#   <base>/by-sha/<sha256>/opensocks-linux-<suffix>.gz  content addressed
+#
+# The second is what the rel.n4t.su mirror uses so a CDN can cache forever; the
+# first is what a plain release download looks like. Either way the archive is
+# verified against the configured SHA-256 before anything is executed, so the
+# URL itself is not a trust boundary.
 set -u
 
 dir=/tmp/opensocks
 program="$dir/opensocks"
 archive="$dir/opensocks.gz"
-feed="https://rel.n4t.su/opkg"
-feed_key="/etc/opkg/keys/d24a5e234001294c"
+
+# Optional index refresh. On OpenWrt 22.03-24.10 the opkg mirror publishes a
+# usign-signed Packages file we can re-read to learn about newer builds. OpenWrt
+# 25.12 has neither opkg nor usign, so this is skipped there and the URL baked in
+# by post-install is used as-is.
+feed="${OPENSOCKS_FEED:-https://rel.n4t.su/opkg}"
+feed_key="${OPENSOCKS_FEED_KEY:-/etc/opkg/keys/d24a5e234001294c}"
+
+attempts=5
+retry_delay=10
+
+log() {
+	echo "opensocks-minimal: $*" >&2
+}
 
 detect_binary_suffix() {
 	case "$(uname -m)" in
@@ -47,6 +75,20 @@ package_field() {
 	' "$dir/Packages"
 }
 
+# Is $1 exactly opensocks-linux-<suffix>.gz, or that name under by-sha/<hex>/?
+binary_url_matches() {
+	url="$1"
+	sha="$2"
+	suffix="$3"
+	name="opensocks-linux-${suffix}.gz"
+	case "$url" in
+	*/"$name") return 0 ;;
+	*/by-sha/"$sha"/"$name") return 0 ;;
+	esac
+	return 1
+}
+
+# Best effort: only runs where a usign-signed opkg index is actually available.
 refresh_release_metadata() {
 	command -v usign >/dev/null 2>&1 || return 1
 	[ -s "$feed_key" ] || return 1
@@ -77,10 +119,7 @@ refresh_release_metadata() {
 	fi
 	[ ${#new_sha} -eq 64 ] || return 1
 	case "$new_sha" in *[!0-9a-f]*) return 1;; esac
-	expected_name="opensocks-linux-${suffix}.gz"
-	if [ "$new_url" != "$feed/by-sha/$new_sha/$expected_name" ]; then
-		return 1
-	fi
+	binary_url_matches "$new_url" "$new_sha" "$suffix" || return 1
 	uci set opensocks.settings.binary_sha256="$new_sha"
 	uci set opensocks.settings.binary_url="$new_url"
 	uci commit opensocks
@@ -92,35 +131,84 @@ download_and_verify() {
 	sha="$(uci -q get opensocks.settings.binary_sha256)"
 	[ -n "$url" ] && [ ${#sha} -eq 64 ] || return 1
 	case "$sha" in *[!0-9a-f]*) return 1;; esac
-	[ "$url" = "$feed/by-sha/$sha/opensocks-linux-${suffix}.gz" ] || return 1
+	# Refuse to fetch anything that is not the daemon archive for this CPU, even
+	# if the URL in UCI were tampered with: the name is pinned and the contents
+	# are checked against the hash below.
+	binary_url_matches "$url" "$sha" "$suffix" || return 1
+
 	rm -f "$archive.part" "$program.new"
-	wget -q -O "$archive.part" "$url" || return 1
-	[ "$(sha256sum "$archive.part" | awk '{print $1}')" = "$sha" ] || return 1
-	gzip -t "$archive.part" || return 1
+	wget -q -O "$archive.part" "$url" || {
+		rm -f "$archive.part"
+		return 1
+	}
+	actual="$(sha256sum "$archive.part" | awk '{print $1}')"
+	[ "$actual" = "$sha" ] || {
+		log "checksum mismatch for $url (expected $sha, got $actual)"
+		rm -f "$archive.part"
+		return 1
+	}
+	gzip -t "$archive.part" || {
+		log "downloaded file is not a gzip archive: $url"
+		rm -f "$archive.part"
+		return 1
+	}
 	mv "$archive.part" "$archive"
-	gzip -dc "$archive" > "$program.new" || return 1
+	gzip -dc "$archive" > "$program.new" || {
+		log "cannot decompress $archive"
+		rm -f "$program.new"
+		return 1
+	}
 	chmod 0755 "$program.new"
 	mv "$program.new" "$program"
 }
 
+# If the daemon is already unpacked there is nothing to do.
+[ -x "$program" ] && exec "$program" --daemon
+
 mkdir -p "$dir"
+
 binary_suffix="$(detect_binary_suffix)" || {
-	echo "OpenSocks does not support CPU architecture: $(uname -m)" >&2
+	log "unsupported CPU architecture: $(uname -m)"
 	exit 1
 }
+
 refresh_release_metadata || true
+
 configured_sha="$(uci -q get opensocks.settings.binary_sha256)"
 configured_url="$(uci -q get opensocks.settings.binary_url)"
-[ "$configured_url" = "$feed/by-sha/$configured_sha/opensocks-linux-${binary_suffix}.gz" ] || {
-	echo "OpenSocks has no verified binary for CPU architecture: $(uname -m)" >&2
-	exit 1
-}
-if [ ! -s "$archive" ] || [ "$(sha256sum "$archive" 2>/dev/null | awk '{print $1}')" != "$configured_sha" ]; then
-	rm -f "$archive" "$program" "$program.new"
+
+# A stale archive from an older release must not be reused.
+if [ -s "$archive" ] &&
+	[ "$(sha256sum "$archive" 2>/dev/null | awk '{print $1}')" != "$configured_sha" ]; then
+	rm -f "$archive"
 fi
-while [ ! -x "$program" ]; do
+
+if [ ! -s "$archive" ] &&
+	! binary_url_matches "$configured_url" "$configured_sha" "$binary_suffix"; then
+	log "no download configured for CPU architecture: $(uname -m)"
+	log "binary_url is '$configured_url'"
+	exit 1
+fi
+
+# A bounded retry: procd respawns this script with its own backoff, so looping
+# here forever (as earlier revisions did) only hides the failure from the log and
+# keeps the service in "running" state while the API stays unreachable.
+n=1
+while :; do
+	if [ -s "$archive" ] &&
+		[ "$(sha256sum "$archive" 2>/dev/null | awk '{print $1}')" = "$configured_sha" ]; then
+		gzip -dc "$archive" > "$program" 2>/dev/null && chmod 0755 "$program" && break
+		rm -f "$program"
+	fi
 	download_and_verify "$binary_suffix" && break
-	echo "OpenSocks download or verification failed; retrying in 30 seconds" >&2
-	sleep 30
+	if [ "$n" -ge "$attempts" ]; then
+		log "download failed after $n attempts; giving up so procd can back off"
+		log "url: $configured_url"
+		exit 1
+	fi
+	n=$((n + 1))
+	log "download failed, retrying in ${retry_delay}s ($n/$attempts)"
+	sleep "$retry_delay"
 done
+
 exec "$program" --daemon
