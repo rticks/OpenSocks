@@ -712,10 +712,10 @@ else
 	: > "$smoke_stub/lib/modules/.keep"
 	normalise_stage "$smoke_stub"
 
-	# The union of everything the three packages depend on, minus libc (present
-	# in every apk root) and the engine names, which the packages themselves
-	# provide.
-	stub_pkgs="nftables-json kmod-nft-tproxy ca-bundle uci wget-ssl usign \
+	# The union of everything the three packages depend on. libc is an ordinary apk
+	# dependency rather than something apk synthesises, so it needs a stub too;
+	# the engine names are excluded because the packages provide them.
+	stub_pkgs="libc nftables-json kmod-nft-tproxy ca-bundle uci wget-ssl usign \
 luci-base luci-compat luci-lua-runtime curl"
 
 	run_smoke() {
