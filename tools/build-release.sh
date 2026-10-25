@@ -324,18 +324,24 @@ build_apk_repo() {
 		APK_SIGNING_KEY_FILE="$WORK/opensocks-apk.sec"
 	fi
 
-	# REQUIRE_SIGNATURE covers the usign/opkg feed. The apk feed is optional by
-	# design: a release without an EC key still ships opkg and an unsigned apk
-	# index. So only demand an apk signature when a key was actually supplied,
-	# unless APK_REQUIRE_SIGNATURE overrides that explicitly.
-	apk_require="${APK_REQUIRE_SIGNATURE:-0}"
-	if [ -z "${APK_REQUIRE_SIGNATURE:-}" ] && [ -n "${APK_SIGNING_KEY_FILE:-}" ]; then
-		apk_require=1
+	# apk-tools 3 cannot represent an unsigned repository: mkpkg signs each
+	# package with the key in its trust context, and mkndx then refuses to index
+	# a package whose signature it cannot verify. Without a key there is
+	# therefore nothing installable to publish, so skip the feed entirely rather
+	# than fail halfway through. A tagged release is expected to have the key.
+	if [ -z "${APK_SIGNING_KEY_FILE:-}" ]; then
+		if [ "${APK_REQUIRE_SIGNATURE:-0}" = "1" ]; then
+			printf 'APK_SIGNING_KEY_FILE is required for this release.\n' >&2
+			exit 1
+		fi
+		printf 'Skipping apk packages: no apk signing key.\n'
+		printf 'apk-tools cannot index unsigned packages; set APK_SIGNING_KEY_FILE or APK_KEY_DIR.\n'
+		return 0
 	fi
 
 	APK_SIGNING_KEY_FILE="${APK_SIGNING_KEY_FILE:-}" \
 	APK_PUBLIC_KEY_FILE="${APK_PUBLIC_KEY_FILE:-}" \
-	REQUIRE_SIGNATURE="$apk_require" \
+	REQUIRE_SIGNATURE=1 \
 	FEED_BASE="$FEED_BASE" \
 	OPENSOCKS_TARGETS="$TARGETS" \
 		"$ROOT/tools/build-apk-repo.sh" \

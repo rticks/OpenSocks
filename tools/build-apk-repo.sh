@@ -9,13 +9,17 @@
 # <release>       PKG_RELEASE, e.g. 1 (the apk version becomes <version>-r<release>)
 # <apk-binary>    apk-tools binary built with mkpkg/mkndx/adbsign
 #                 (see tools/build-apk-tool.sh)
-# <key-dir>       directory with the EC P-256 key pair, or "" for no signing.
+# <key-dir>       directory with the EC P-256 key pair.
 #                 Recognised names: private.pem, public.pem.
+#
+# A signing key is mandatory, not optional: mkpkg embeds a signature made with
+# the private key, and mkndx refuses to index a package it cannot verify, so an
+# unsigned apk repository cannot be represented in apk-tools 3.
 #
 # Environment:
 #   APK_SIGNING_KEY_FILE   explicit private key path (default <key-dir>/private.pem)
 #   APK_PUBLIC_KEY_FILE    explicit public key path  (default <key-dir>/public.pem)
-#   REQUIRE_SIGNATURE=1    fail instead of emitting an unsigned index
+#   REQUIRE_SIGNATURE=1    fail (rather than skip) when no key is configured
 #   FEED_BASE              base URL for the download-on-boot binaries
 #   OPENSOCKS_TARGETS      same syntax as build-release.sh
 #   APK_SKIP_VERIFY=1      skip the apk self checks (debugging only)
@@ -41,8 +45,13 @@
 #                        patch for it, so "a | b" cannot be expressed in apk.
 #   include/package-pack.mk
 #                        Architecture: all in opkg is --info arch:noarch in apk.
-#   src/app_mkndx.c      mkndx requires --output; the signing flag is the
-#                        GENERATION option --sign-key (apk(8)), not --sign.
+#   src/app_mkndx.c      mkndx requires --output. It has no signing option of
+#                        its own: the index is signed by whatever private key
+#                        is in the apk trust context, loaded through the global
+#                        GENERATION option --sign-key. mkndx also *verifies*
+#                        each package it indexes and refuses an unsigned one
+#                        ("UNTRUSTED signature"), so --sign-key must be given to
+#                        mkpkg as well, where adb_c_adb writes the signature.
 #   doc/apk-repositories.5.scd
 #                        the repositories URL may point directly at the .adb
 #                        index; package paths then resolve relative to it.
@@ -105,6 +114,33 @@ APK_BIN="$APK_DIR/$(basename "$APK_BIN")"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# Resolve the signing key before anything is packaged. mkpkg signs each package
+# with the private key in its trust context, and mkndx later refuses to index a
+# package whose signature it cannot verify, so both need this up front; defining
+# it after the packaging loop would leave every earlier package unsigned.
+SIGNING_KEY="${APK_SIGNING_KEY_FILE:-}"
+PUBLIC_KEY="${APK_PUBLIC_KEY_FILE:-}"
+if [ -n "$KEY_DIR" ]; then
+	[ -n "$SIGNING_KEY" ] || SIGNING_KEY="$KEY_DIR/private.pem"
+	[ -n "$PUBLIC_KEY" ] || PUBLIC_KEY="$KEY_DIR/public.pem"
+fi
+if [ -n "$SIGNING_KEY" ] && [ ! -f "$SIGNING_KEY" ]; then
+	printf 'apk signing key not found: %s\n' "$SIGNING_KEY" >&2
+	exit 1
+fi
+if [ -n "$PUBLIC_KEY" ] && [ ! -f "$PUBLIC_KEY" ]; then
+	printf 'apk public key not found: %s\n' "$PUBLIC_KEY" >&2
+	exit 1
+fi
+if [ -n "$SIGNING_KEY" ] && [ -z "$PUBLIC_KEY" ]; then
+	printf 'apk public key not set; use APK_PUBLIC_KEY_FILE or <key-dir>/public.pem\n' >&2
+	exit 1
+fi
+if [ -z "$SIGNING_KEY" ] && [ "${REQUIRE_SIGNATURE:-0}" = "1" ]; then
+	printf 'APK_SIGNING_KEY_FILE is required; refusing to build an unsigned apk repository.\n' >&2
+	exit 1
+fi
 
 # The rest of the release tooling calls shasum (Perl); CI's ubuntu image has it,
 # but a minimal container or a macOS/Windows dev box may only have sha256sum.
@@ -308,10 +344,17 @@ build_apk() {
 	stage="$7"
 	shift 7
 	rm -f "$out"
-	# PROVIDES is optional; it carries the versioned virtual name that lets two
-	# alternative implementations satisfy one dependency (see ENGINE_PROVIDES).
-	set -- "$@" ${PROVIDES:+--info provides:$PROVIDES}
+
+	# --sign-key is a GENERATION option that loads a private key into the trust
+	# context, and mkpkg signs the ADB with whatever private keys it finds
+	# (adb_c_adb -> adb_trust_write_signatures). It must be passed HERE, not to
+	# mkndx: mkndx only *verifies* the packages it indexes, so it needs the
+	# packages to already carry a signature it can check.
+	#
+	# The caller's remaining arguments (--script TYPE:FILE) stay in "$@" and are
+	# appended after the generated ones.
 	"$APK_BIN" mkpkg \
+		${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} \
 		--info "name:$name" \
 		--info "version:$APK_VERSION" \
 		--info "arch:$arch" \
@@ -321,6 +364,7 @@ build_apk() {
 		--info "maintainer:OpenSocks Developers" \
 		--info "description:$description" \
 		--info "depends:$depends" \
+		${PROVIDES:+--info "provides:$PROVIDES"} \
 		"$@" \
 		--files "$stage" \
 		--output "$out" \
@@ -532,24 +576,8 @@ printf 'built luci-app-opensocks-%s-noarch.apk\n' "$APK_VERSION"
 # Repository index
 # ---------------------------------------------------------------------------
 
-SIGNING_KEY="${APK_SIGNING_KEY_FILE:-}"
-PUBLIC_KEY="${APK_PUBLIC_KEY_FILE:-}"
-if [ -n "$KEY_DIR" ]; then
-	[ -n "$SIGNING_KEY" ] || SIGNING_KEY="$KEY_DIR/private.pem"
-	[ -n "$PUBLIC_KEY" ] || PUBLIC_KEY="$KEY_DIR/public.pem"
-fi
-if [ -n "$SIGNING_KEY" ] && [ ! -f "$SIGNING_KEY" ]; then
-	printf 'apk signing key not found: %s\n' "$SIGNING_KEY" >&2
-	exit 1
-fi
-if [ -n "$PUBLIC_KEY" ] && [ ! -f "$PUBLIC_KEY" ]; then
-	printf 'apk public key not found: %s\n' "$PUBLIC_KEY" >&2
-	exit 1
-fi
-if [ -n "$SIGNING_KEY" ] && [ -z "$PUBLIC_KEY" ]; then
-	printf 'apk public key not set; use APK_PUBLIC_KEY_FILE or <key-dir>/public.pem\n' >&2
-	exit 1
-fi
+# SIGNING_KEY/PUBLIC_KEY were resolved at the top; mkpkg already used the private
+# key, so the packages carry signatures mkndx can verify.
 
 # Every .apk lives in one flat directory, so the index must tell apk how to map
 # a package onto its filename. --pkgname-spec is stored in the index and
@@ -577,11 +605,16 @@ for apk in "$@"; do
 done
 set -- "$OUT"/repo/*.apk
 
+# mkndx re-reads every package through apk_extract and refuses an unsigned one
+# ("UNTRUSTED signature"), so the packages must already carry a signature from
+# mkpkg. --sign-key also loads the key into the trusted set for this run, which
+# is what lets mkndx verify them; the same key is therefore passed to every
+# mkpkg above.
 run_mkndx() {
 	# mkndx writes diagnostics to stderr; keep them for the failure path and for
 	# the pkgname-spec check below, and echo them when it fails so the log says
 	# why instead of only "exit code 1".
-	if "$APK_BIN" mkndx \
+	if "$APK_BIN" ${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} mkndx \
 		--output "$OUT/repo/packages.adb" \
 		--description "OpenSocks $VERSION" \
 		--pkgname-spec "$PKGNAME_SPEC" \
@@ -593,24 +626,14 @@ run_mkndx() {
 	return 1
 }
 
-if [ -n "$SIGNING_KEY" ]; then
-	# --sign-key is the documented GENERATION option (apk(8)); OpenWrt's
-	# Makefile writes --sign, which only works as a unique-prefix abbreviation.
-	run_mkndx --sign-key "$SIGNING_KEY" "$@"
-	cp "$PUBLIC_KEY" "$OUT/repo/opensocks.pem"
-	# The v2-style fingerprint name is kept as an extra alias: opkg's usign key
-	# is named by fingerprint, so an operator copying keys between the two feeds
-	# finds a matching name. apk itself matches the key by identity, not name.
-	printf 'apk index signed; public key published as opensocks.pem\n'
-else
-	if [ "${REQUIRE_SIGNATURE:-0}" = "1" ]; then
-		printf 'APK_SIGNING_KEY_FILE is required; refusing to publish an unsigned apk repository.\n' >&2
-		exit 1
-	fi
-	printf 'WARNING: no apk signing key supplied; publishing an UNSIGNED packages.adb.\n' >&2
-	printf 'WARNING: 25.12 clients reject it unless run with --allow-untrusted.\n' >&2
-	run_mkndx "$@"
-fi
+# A key is mandatory (checked at the top): mkpkg signs each package with it and
+# mkndx verifies that signature while indexing. There is no unsigned feed.
+run_mkndx "$@"
+cp "$PUBLIC_KEY" "$OUT/repo/opensocks.pem"
+# The v2-style fingerprint name is kept as an extra alias: opkg's usign key is
+# named by fingerprint, so an operator copying keys between the two feeds finds a
+# matching name. apk itself matches the key by identity, not name.
+printf 'apk index signed; public key published as opensocks.pem\n'
 [ -s "$OUT/repo/packages.adb" ] || {
 	printf 'apk mkndx produced no index\n' >&2
 	# mkndx's stderr went to the log file; surface it, otherwise the failure is

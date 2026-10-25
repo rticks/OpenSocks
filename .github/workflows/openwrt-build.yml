@@ -170,8 +170,19 @@ jobs:
         env:
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
           APK_BIN: ${{ runner.temp }}/apk-tools-bin/apk
+          # A tagged release must ship the apk feed; a branch or fork run without
+          # the apk signing secret legitimately skips it.
+          REQUIRE_APK: ${{ (github.ref_type == 'tag' || secrets.APK_SIGNING_KEY_PEM != '') && '1' || '0' }}
         run: |
           set -eu
+          if [ "$REQUIRE_APK" != "1" ]; then
+            if [ -d "$RELEASE_DIR/repo" ]; then
+              echo 'apk feed present even though no key was configured' >&2
+              exit 1
+            fi
+            echo 'apk feed skipped (no APK_SIGNING_KEY_PEM secret and not a release)' >&2
+            exit 0
+          fi
           # build-apk-repo.sh already verified the index, every package and an
           # install into a throwaway root. Re-assert the layout here so a change
           # in that script cannot silently drop an artifact.
@@ -236,10 +247,11 @@ jobs:
               cp "$RELEASE_DIR/repo/SHA256SUMS" "$assets/apk-SHA256SUMS"
             fi
           fi
-          test -s "$assets/packages.adb" || {
-            echo 'apk index is missing from the release assets' >&2
-            exit 1
-          }
+          if [ -s "$assets/packages.adb" ]; then
+            echo "apk feed included: $(find "$assets" -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ') package(s)"
+          else
+            echo 'apk feed not included in this release (APK_SIGNING_KEY_PEM secret not configured)' >&2
+          fi
           gh release create "$GITHUB_REF_NAME" "$assets"/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
