@@ -1,7 +1,7 @@
-include $(TOPDIR)/rules.mk
+﻿include $(TOPDIR)/rules.mk
 
 PKG_NAME:=opensocks
-PKG_VERSION:=0.2.13
+PKG_VERSION:=0.3.0
 PKG_RELEASE:=1
 
 PKG_MAINTAINER:=OpenSocks Developers
@@ -23,14 +23,16 @@ define Package/opensocks
   CATEGORY:=Network
   SUBMENU:=Proxy
   TITLE:=Low-memory Transocks proxy daemon for OpenWrt
-  DEPENDS:=+shadowsocks-libev-ss-redir +shadowsocks-libev-ss-local +nftables-json +kmod-nft-tproxy +ca-bundle +uci
+  DEPENDS:=+nftables-json +kmod-nft-tproxy +ca-bundle +uci
+  PROVIDES:=opensocks-engine
 endef
 
 define Package/opensocks/description
   Clean-room daemon for the Transocks VPN service on OpenWrt.
-  Fetches lines, resolves Shadowsocks server configs and supervises a tiny
-  ss-redir process. Smart routing uses an nftables China CIDR set and is
-  designed for low-memory routers.
+  Fetches lines and resolves Shadowsocks server configs. The Shadowsocks data
+  plane (TCP REDIRECT, UDP TPROXY, SOCKS5) is compiled into the daemon, so no
+  external ss-redir/ss-local binary is required. Smart routing uses an
+  nftables China CIDR set and is designed for low-memory routers.
 endef
 
 define Package/opensocks/install

@@ -34,7 +34,6 @@ type settings struct {
 	MobileEnabled  bool
 	MobilePort     int
 	GeoIPURL       string
-	EngineBinary   string
 }
 
 func readSettings() *settings {
@@ -50,7 +49,6 @@ func readSettings() *settings {
 		MobileEnabled: true,
 		MobilePort:    9092,
 		GeoIPURL:      "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb",
-		EngineBinary:  "/usr/bin/ss-redir",
 		SessionCount:  1,
 	}
 	s.Token = loadSession()
@@ -108,14 +106,13 @@ func readSettings() *settings {
 	if v := values["geoip_url"]; v != "" {
 		s.GeoIPURL = v
 	}
-	if v := values["engine_binary"]; v != "" {
-		s.EngineBinary = v
+	// Releases up to 0.2.x stored the external engine path in UCI. The engine is
+	// in-process now, so a stale option would only confuse the UI; drop it.
+	if _, ok := values["engine_binary"]; ok {
+		uciDelete("engine_binary")
 	}
 	return s
 }
-
-// engine settings are read on demand so changes apply without daemon restart.
-func cfgEngineBinary() string { return readSettings().EngineBinary }
 
 func saveToken(token string) {
 	if err := saveSession(token); err != nil {

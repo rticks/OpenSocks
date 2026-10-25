@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,18 +46,14 @@ func prepareTripleSpeedSession() error {
 	if err != nil {
 		return err
 	}
-	boot := selectedBoot(response)
-	if boot == nil || strings.EqualFold(boot.Proto, "Trojan") {
-		return fmt.Errorf("third session returned no Shadowsocks configuration")
-	}
-	config, err := json.Marshal(map[string]any{
-		"server": boot.Server, "server_port": boot.Port, "local_address": "127.0.0.1", "local_port": 7894,
-		"password": boot.Password, "method": boot.Method, "timeout": 60, "mode": "tcp_only", "fast_open": false,
-	})
+	upstream, err := upstreamFromBoot(selectedSSBoot(response))
 	if err != nil {
-		return err
+		return fmt.Errorf("third session returned no usable Shadowsocks configuration: %w", err)
 	}
-	if err := os.WriteFile(engineDir+"/config-3.yaml", config, 0600); err != nil {
+	// Register the third session in the in-process engine so the speed pool can
+	// spread benchmark flows across it. The third slot binds the 7894/7895 pair.
+	redirect, socks := sessionPorts(2)
+	if err := activeEngineStartExtra(upstream, "speed-3", redirect, socks); err != nil {
 		return err
 	}
 	digest := sha256.Sum256([]byte(token))
@@ -266,10 +261,6 @@ func (c *controller) connectMultiLine(ln *line, request connectRequest, switchin
 	return nil
 }
 
-func issueDualConnections(domain string, lineID int, request connectRequest) ([]*apiClient, []*connectResponse, []string, error) {
-	return issueConnections(domain, []int{lineID, lineID}, request)
-}
-
 func sessionLineIDs(primary int, cfg settings, count int) []int {
 	ids := []int{primary, cfg.Slot2LineID, cfg.Slot3LineID}
 	if count < 1 {
@@ -351,7 +342,7 @@ func issueConnections(domain string, lineIDs []int, request connectRequest) ([]*
 		if connectErr != nil {
 			return nil, nil, nil, fmt.Errorf("session slot %d connect: %w", i+1, connectErr)
 		}
-		if responses[i] == nil || selectedBoot(responses[i]) == nil {
+		if responses[i] == nil || selectedSSBoot(responses[i]) == nil {
 			return nil, nil, nil, fmt.Errorf("session slot %d returned no Shadowsocks config", i+1)
 		}
 	}
@@ -443,7 +434,7 @@ func runDualSessionProbe() error {
 		defer clients[i].disconnect(connections[i].LineID)
 	}
 	for i, connection := range connections {
-		boot := selectedBoot(connection)
+		boot := selectedSSBoot(connection)
 		if boot == nil {
 			return fmt.Errorf("issued session %d returned no Shadowsocks configuration", i+1)
 		}

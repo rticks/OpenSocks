@@ -33,7 +33,7 @@ func TestDeviceIdentitySlotsAreStableAndDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if posixFileModesEnforced() && info.Mode().Perm() != 0600 {
 		t.Fatalf("identity permissions = %o, want 600", info.Mode().Perm())
 	}
 }

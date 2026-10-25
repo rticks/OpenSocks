@@ -28,21 +28,9 @@ func (c *controller) setupNetwork(mode string) (*setupResult, error) {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return nil, fmt.Errorf("nft command is required: %w", err)
 	}
-	if _, err := exec.LookPath("ss-redir"); err != nil {
-		logf("ss-redir is missing; installing lightweight engine")
-		if out, installErr := exec.Command("opkg", "update").CombinedOutput(); installErr != nil {
-			return nil, fmt.Errorf("opkg update failed: %w (%s)", installErr, truncate(string(out), 500))
-		}
-		if out, installErr := exec.Command("opkg", "install", "shadowsocks-libev-ss-redir", "nftables-json", "ca-bundle").CombinedOutput(); installErr != nil {
-			return nil, fmt.Errorf("lightweight engine install failed: %w (%s)", installErr, truncate(string(out), 500))
-		}
-	}
-	if _, err := exec.LookPath("ss-local"); err != nil {
-		if out, installErr := exec.Command("opkg", "install", "shadowsocks-libev-ss-local").CombinedOutput(); installErr != nil {
-			return nil, fmt.Errorf("speed-test helper install failed: %w (%s)", installErr, truncate(string(out), 500))
-		}
-	}
-	saveSetting("engine_binary", "/usr/bin/ss-redir")
+	// The Shadowsocks engine is part of this binary, so there is nothing to
+	// install at setup time. Only the nftables userspace tool matters, and the
+	// package dependencies already pull it in.
 	saveSetting("tun", "0")
 	saveSetting("mode", mode)
 	saveSetting("auto_connect", "1")
@@ -55,7 +43,7 @@ func (c *controller) setupNetwork(mode string) (*setupResult, error) {
 	if err := c.connect(-1); err != nil {
 		return nil, err
 	}
-	return &setupResult{OK: true, LANDevice: detectLANDevice(), Engine: "ss-redir", Mode: mode, Message: "network integration is active"}, nil
+	return &setupResult{OK: true, LANDevice: detectLANDevice(), Engine: "builtin", Mode: mode, Message: "network integration is active"}, nil
 }
 
 // controller wires the API client, engine and UCI settings together.
@@ -74,9 +62,11 @@ type controller struct {
 }
 
 func newController(cfg *settings) *controller {
+	eng := newEngine()
+	activeEngine.Store(eng)
 	return &controller{
 		api:    newAPIClient(cfg.APIDomain),
-		engine: newEngine(),
+		engine: eng,
 		cfg:    cfg,
 	}
 }
@@ -375,10 +365,11 @@ func (c *controller) connect(wantID int) error {
 		return fmt.Errorf("not logged in: register (free) or login first")
 	}
 	if c.engine.isRunning() {
-		if wantID <= 0 || wantID == c.engine.lineID {
+		currentLineID, _ := c.engine.lineInfo()
+		if wantID <= 0 || wantID == currentLineID {
 			return nil
 		}
-		logf("switching server from line %d to line %d", c.engine.lineID, wantID)
+		logf("switching server from line %d to line %d", currentLineID, wantID)
 		switching = true
 	}
 
@@ -481,7 +472,7 @@ func (c *controller) status() map[string]any {
 		"token":              cfg.Token != "",
 		"mode":               cfg.Mode,
 		"tun":                false,
-		"engine":             "ss-redir",
+		"engine":             "builtin",
 		"region":             cfg.Region,
 		"excludeRegions":     cfg.ExcludeRegions,
 		"includeDomains":     cfg.IncludeDomains,

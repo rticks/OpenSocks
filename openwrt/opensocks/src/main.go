@@ -108,8 +108,8 @@ func runDaemon() {
 		}
 	}()
 
-	// procd sends SIGTERM on stop/restart. Clean up the child redirection
-	// process and firewall table so neither survives as an orphan.
+	// procd sends SIGTERM on stop/restart. Close the listeners and remove the
+	// nftables table so neither survives as an orphan.
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	go func() {

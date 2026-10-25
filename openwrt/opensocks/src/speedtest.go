@@ -5,33 +5,32 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
 const ooklaServersURL = "https://www.speedtest.net/api/js/servers?engine=js&search=China&limit=30"
 const speedTestCNNodesURL = "https://nodes-api.speedtest.cn?type=multi&https=1&browser=1&domainType=2&use_cdn=1"
-const speedSOCKSPIDFile = "/tmp/opensocks/speedtest-ss-local.pid"
-const speedDualSOCKSPIDFile = "/tmp/opensocks/speedtest-ss-local-2.pid"
-const speedTripleSOCKSPIDFile = "/tmp/opensocks/speedtest-ss-local-3.pid"
-const speedDualSOCKSPort = 7893
-const speedTripleSOCKSPort = 7895
 
-var speedDualPath atomic.Bool
+// The speed pool reuses the in-process listeners. The daemon already binds
+// socksPort for slot 1; the dual and triple slots get dedicated SOCKS listeners
+// so a benchmark can spread flows across independent authenticated sessions
+// without spawning ss-local helpers.
+
+// speedPathCount records how many session listeners the current benchmark can
+// spread flows across. The download/upload worker count reads it to avoid opening
+// more parallel streams than there are proxy sessions to carry them.
 var speedPathCount atomic.Int32
 
 type speedServer struct {
@@ -368,125 +367,78 @@ func runSpeedTestCN(server speedTestCNServer) (*speedTestCNResult, error) {
 	return &speedTestCNResult{Server: server, PingMS: ping, DownloadMbps: float64(downloaded) * 8 / dd / 1e6, UploadMbps: float64(uploaded) * 8 / ud / 1e6, BytesDownloaded: downloaded, BytesUploaded: uploaded}, nil
 }
 
-func startSpeedSOCKS() (*exec.Cmd, error) {
-	cmds, _, err := startSpeedSOCKSPoolWithDual(false)
-	if err != nil {
-		return nil, err
+// speedSession is one SOCKS endpoint owned by the running daemon. The speed
+// tests reuse the daemon's own listeners instead of spawning helper processes,
+// so there is nothing to start or reap; the type exists so callers keep their
+// explicit "acquire then release" structure.
+type speedSession struct {
+	port int
+}
+
+// startSpeedSOCKS reserves the primary SOCKS endpoint for a benchmark. The
+// handle carries no process to start or stop: the daemon's in-process listener
+// already serves it. Callers hold speedMu so benchmarks never overlap.
+func startSpeedSOCKS() (*speedSession, error) {
+	if !engineRunning() {
+		return nil, fmt.Errorf("connect to a China line before running a speed test")
 	}
-	return cmds[0], nil
+	return &speedSession{port: socksPort}, nil
 }
 
-func startSpeedSOCKSPool() ([]*exec.Cmd, func(context.Context, string, string) (net.Conn, error), error) {
+// startSpeedSOCKSPool returns a dialer that spreads requests across every
+// active session listener. The returned slice is empty: there are no child
+// processes to stop, and callers only pass it back to stopSpeedSOCKSPool.
+func startSpeedSOCKSPool() ([]*speedSession, func(context.Context, string, string) (net.Conn, error), error) {
 	count := readSettings().SessionCount
-	dual := count >= 2 && fileExists(engineDir+"/config-2.yaml")
-	return startSpeedSOCKSPoolWithPaths(dual, count >= 3 && fileExists(engineDir+"/config-3.yaml"))
+	dual := count >= 2 && engineSessionCount() >= 2
+	return startSpeedSOCKSPoolWithPaths(dual, count >= 3 && engineSessionCount() >= 3)
 }
 
-func startSpeedSOCKSPoolWithDual(dual bool) ([]*exec.Cmd, func(context.Context, string, string) (net.Conn, error), error) {
-	return startSpeedSOCKSPoolWithPaths(dual, false)
-}
-
-func startSpeedSOCKSPoolWithPaths(dual, triple bool) ([]*exec.Cmd, func(context.Context, string, string) (net.Conn, error), error) {
-	if _, err := exec.LookPath("ss-local"); err != nil {
-		return nil, nil, fmt.Errorf("ss-local is required for China-route speed testing")
+func startSpeedSOCKSPoolWithPaths(dual, triple bool) ([]*speedSession, func(context.Context, string, string) (net.Conn, error), error) {
+	if !engineRunning() {
+		return nil, nil, fmt.Errorf("connect to a China line before running a speed test")
 	}
 	// This target has no swap and only 128 MB RAM. Return idle Go pages before
-	// starting two encrypted helpers and their HTTP socket buffers.
+	// the benchmark allocates its HTTP buffers.
 	debug.FreeOSMemory()
-	cleanupStaleSpeedSOCKS()
-	configs := []string{engineConf}
 	ports := []int{socksPort}
-	pidFiles := []string{speedSOCKSPIDFile}
 	if dual {
-		configs = append(configs, engineDir+"/config-2.yaml")
-		ports = append(ports, speedDualSOCKSPort)
-		pidFiles = append(pidFiles, speedDualSOCKSPIDFile)
+		_, socks := sessionPorts(1)
+		ports = append(ports, socks)
 	}
 	if triple {
-		configs = append(configs, engineDir+"/config-3.yaml")
-		ports = append(ports, speedTripleSOCKSPort)
-		pidFiles = append(pidFiles, speedTripleSOCKSPIDFile)
+		_, socks := sessionPorts(2)
+		ports = append(ports, socks)
 	}
-	cmds := make([]*exec.Cmd, 0, len(configs))
-	for i := range configs {
-		// Speed tests are HTTP-only. Avoid allocating UDP relay state in both
-		// helpers on low-memory routers.
-		cmd := exec.Command("ss-local", "-c", configs[i], "-b", "127.0.0.1", "-l", fmt.Sprint(ports[i]))
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Start(); err != nil {
-			stopSpeedSOCKSPool(cmds)
-			return nil, nil, err
-		}
-		cmds = append(cmds, cmd)
-		if err := os.WriteFile(pidFiles[i], []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
-			stopSpeedSOCKSPool(cmds)
-			return nil, nil, err
-		}
-	}
-	time.Sleep(500 * time.Millisecond)
-	for _, cmd := range cmds {
-		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-			stopSpeedSOCKSPool(cmds)
-			return nil, nil, fmt.Errorf("China-route test helper stopped during startup")
-		}
+	sessions := make([]*speedSession, 0, len(ports))
+	for _, port := range ports {
+		sessions = append(sessions, &speedSession{port: port})
 	}
 	setSpeedDual(len(ports) > 1)
 	setSpeedSessions(len(ports))
-	speedDualPath.Store(len(ports) > 1)
 	speedPathCount.Store(int32(len(ports)))
 	var next atomic.Uint32
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		port := ports[int(next.Add(1)-1)%len(ports)]
 		return socksDialPort(ctx, address, port)
 	}
-	return cmds, dial, nil
+	return sessions, dial, nil
 }
 
+// cleanupStaleSpeedSOCKS removes PID files written by releases that spawned
+// ss-local helpers. The in-process engine leaves no helper processes behind.
 func cleanupStaleSpeedSOCKS() {
-	cleanupSpeedSOCKSPID(speedSOCKSPIDFile)
-	cleanupSpeedSOCKSPID(speedDualSOCKSPIDFile)
-	cleanupSpeedSOCKSPID(speedTripleSOCKSPIDFile)
-}
-
-func cleanupSpeedSOCKSPID(pidFile string) {
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err == nil && pid > 1 {
-		cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-		if strings.Contains(strings.ReplaceAll(string(cmdline), "\x00", " "), "ss-local") {
-			if process, findErr := os.FindProcess(pid); findErr == nil {
-				_ = process.Kill()
-			}
-		}
-	}
-	_ = os.Remove(pidFile)
-}
-
-func stopSpeedSOCKS(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
-	raw, err := os.ReadFile(speedSOCKSPIDFile)
-	if err == nil && strings.TrimSpace(string(raw)) == strconv.Itoa(cmd.Process.Pid) {
-		_ = os.Remove(speedSOCKSPIDFile)
+	for _, name := range []string{"speedtest-ss-local.pid", "speedtest-ss-local-2.pid", "speedtest-ss-local-3.pid"} {
+		_ = os.Remove(engineDir + "/" + name)
 	}
 }
 
-func stopSpeedSOCKSPool(cmds []*exec.Cmd) {
-	for _, cmd := range cmds {
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-		}
-	}
-	_ = os.Remove(speedSOCKSPIDFile)
-	_ = os.Remove(speedDualSOCKSPIDFile)
-	_ = os.Remove(speedTripleSOCKSPIDFile)
+func stopSpeedSOCKS(session *speedSession) {
+	_ = session
+}
+
+func stopSpeedSOCKSPool(sessions []*speedSession) {
+	_ = sessions
 }
 
 func socksDial(ctx context.Context, network, address string) (net.Conn, error) {
@@ -494,54 +446,7 @@ func socksDial(ctx context.Context, network, address string) (net.Conn, error) {
 }
 
 func socksDialPort(ctx context.Context, address string, portNumber int) (net.Conn, error) {
-	d := net.Dialer{Timeout: 8 * time.Second}
-	c, err := d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", portNumber))
-	if err != nil {
-		return nil, err
-	}
-	if _, err = c.Write([]byte{5, 1, 0}); err != nil {
-		c.Close()
-		return nil, err
-	}
-	b := make([]byte, 2)
-	if _, err = io.ReadFull(c, b); err != nil || b[1] != 0 {
-		c.Close()
-		return nil, fmt.Errorf("SOCKS negotiation failed")
-	}
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	port := 0
-	fmt.Sscan(portText, &port)
-	req := []byte{5, 1, 0, 3, byte(len(host))}
-	req = append(req, host...)
-	p := make([]byte, 2)
-	binary.BigEndian.PutUint16(p, uint16(port))
-	req = append(req, p...)
-	if _, err = c.Write(req); err != nil {
-		c.Close()
-		return nil, err
-	}
-	head := make([]byte, 4)
-	if _, err = io.ReadFull(c, head); err != nil || head[1] != 0 {
-		c.Close()
-		return nil, fmt.Errorf("SOCKS connect failed")
-	}
-	n := 0
-	switch head[3] {
-	case 1:
-		n = 4
-	case 4:
-		n = 16
-	case 3:
-		x := make([]byte, 1)
-		io.ReadFull(c, x)
-		n = int(x[0])
-	}
-	io.CopyN(io.Discard, c, int64(n+2))
-	return c, nil
+	return socksDialThrough(ctx, portNumber, address)
 }
 
 func runChinaSpeedTest(server speedServer) (*speedResult, error) {

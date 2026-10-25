@@ -27,7 +27,7 @@ func TestCredentialStoreUsesRootOnlyPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if posixFileModesEnforced() && info.Mode().Perm() != 0600 {
 		t.Fatalf("permissions = %o, want 600", info.Mode().Perm())
 	}
 	raw, err := os.ReadFile(credentialsFile)
@@ -41,7 +41,7 @@ func TestCredentialStoreUsesRootOnlyPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if keyInfo.Mode().Perm() != 0600 {
+	if posixFileModesEnforced() && keyInfo.Mode().Perm() != 0600 {
 		t.Fatalf("key permissions = %o, want 600", keyInfo.Mode().Perm())
 	}
 }

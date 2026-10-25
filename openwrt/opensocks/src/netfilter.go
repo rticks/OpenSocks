@@ -17,9 +17,10 @@ import (
 	"time"
 )
 
-// Lightweight transparent routing for firewall4-based OpenWrt. ss-redir
-// receives only TCP flows selected by this nftables chain. Smart mode uses a
-// compact CIDR list instead of loading a MaxMind database into a large engine.
+// Lightweight transparent routing for firewall4-based OpenWrt. The daemon's
+// in-process Shadowsocks listener receives only the TCP flows selected by this
+// nftables chain. Smart mode uses a compact CIDR list instead of loading a
+// MaxMind database into a large engine.
 
 const chinaRoutesURL = "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 const chinaRoutesSHA256 = "1e855b2493221becffe6261c97efce005f2cea65bf506e3c6ca1687d7e7551ad"
@@ -79,8 +80,11 @@ func setupRedirect(mode string, proxyServers []string, sessionCount int) error {
 	}
 
 	var script strings.Builder
-	tcpRedirect := fmt.Sprintf("redirect to :%d", mixedPort)
-	udpRedirect := fmt.Sprintf("meta mark set 0x51 tproxy ip to :%d accept", mixedPort)
+	redirect1, _ := sessionPorts(0)
+	redirect2, _ := sessionPorts(1)
+	redirect3, _ := sessionPorts(2)
+	tcpRedirect := fmt.Sprintf("redirect to :%d", redirect1)
+	udpRedirect := fmt.Sprintf("meta mark set 0x51 tproxy ip to :%d accept", redirect1)
 	if sessionCount == 2 {
 		tcpRedirect = "numgen random mod 2 vmap { 0 : jump tcp_slot1, 1 : jump tcp_slot2 }"
 		udpRedirect = "symhash mod 2 vmap { 0 : jump udp_slot1, 1 : jump udp_slot2 }"
@@ -98,15 +102,17 @@ func setupRedirect(mode string, proxyServers []string, sessionCount int) error {
 	}
 	script.WriteString(" counter svc_other_china_up {}\n counter svc_other_china_down {}\n")
 	if sessionCount >= 2 {
-		script.WriteString(fmt.Sprintf(" chain tcp_slot1 { meta l4proto tcp counter redirect to :%d; }\n", mixedPort))
-		script.WriteString(fmt.Sprintf(" chain tcp_slot2 { meta l4proto tcp counter redirect to :%d; }\n", dualPort))
+		// Each slot targets the redirect port of the matching engine session, so
+		// the nftables chains and the listeners cannot drift apart.
+		script.WriteString(fmt.Sprintf(" chain tcp_slot1 { meta l4proto tcp counter redirect to :%d; }\n", redirect1))
+		script.WriteString(fmt.Sprintf(" chain tcp_slot2 { meta l4proto tcp counter redirect to :%d; }\n", redirect2))
 		if sessionCount >= 3 {
-			script.WriteString(fmt.Sprintf(" chain tcp_slot3 { meta l4proto tcp counter redirect to :%d; }\n", triplePort))
+			script.WriteString(fmt.Sprintf(" chain tcp_slot3 { meta l4proto tcp counter redirect to :%d; }\n", redirect3))
 		}
-		script.WriteString(fmt.Sprintf(" chain udp_slot1 { meta l4proto udp counter meta mark set 0x51 tproxy ip to :%d accept; }\n", mixedPort))
-		script.WriteString(fmt.Sprintf(" chain udp_slot2 { meta l4proto udp counter meta mark set 0x51 tproxy ip to :%d accept; }\n", dualPort))
+		script.WriteString(fmt.Sprintf(" chain udp_slot1 { meta l4proto udp counter meta mark set 0x51 tproxy ip to :%d accept; }\n", redirect1))
+		script.WriteString(fmt.Sprintf(" chain udp_slot2 { meta l4proto udp counter meta mark set 0x51 tproxy ip to :%d accept; }\n", redirect2))
 		if sessionCount >= 3 {
-			script.WriteString(fmt.Sprintf(" chain udp_slot3 { meta l4proto udp counter meta mark set 0x51 tproxy ip to :%d accept; }\n", triplePort))
+			script.WriteString(fmt.Sprintf(" chain udp_slot3 { meta l4proto udp counter meta mark set 0x51 tproxy ip to :%d accept; }\n", redirect3))
 		}
 	}
 	if mode != "global" {
@@ -153,7 +159,7 @@ func setupRedirect(mode string, proxyServers []string, sessionCount int) error {
 		script.WriteString("  ip daddr @cn4 meta l4proto tcp counter " + tcpRedirect + "\n")
 	}
 	script.WriteString(" }\n")
-	// ss-redir receives UDP through TPROXY. 王者荣耀 uses UDP for PVP, so
+	// The engine receives UDP through TPROXY. 王者荣耀 uses UDP for PVP, so
 	// redirecting TCP alone leaves the actual match outside the China route.
 	script.WriteString(" chain prerouting_udp { type filter hook prerouting priority mangle; policy accept;\n")
 	script.WriteString("  iifname != \"" + detectLANDevice() + "\" return\n")

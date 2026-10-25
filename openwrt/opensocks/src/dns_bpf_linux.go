@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // attachDNSResponseFilter keeps non-DNS LAN traffic in the kernel. Without
@@ -25,7 +27,7 @@ func attachDNSResponseFilter(fd int) error {
 	}
 	program := syscall.SockFprog{Len: uint16(len(filters)), Filter: &filters[0]}
 	_, _, errno := syscall.Syscall6(
-		syscall.SYS_SETSOCKOPT,
+		unix.SYS_SETSOCKOPT,
 		uintptr(fd), syscall.SOL_SOCKET, soAttachFilter,
 		uintptr(unsafe.Pointer(&program)), unsafe.Sizeof(program), 0,
 	)

@@ -17,7 +17,7 @@ func TestSessionStoreIsRootOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if posixFileModesEnforced() && info.Mode().Perm() != 0600 {
 		t.Fatalf("session mode = %o, want 600", info.Mode().Perm())
 	}
 	if got := loadSession(); got != "session-value" {

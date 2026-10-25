@@ -73,7 +73,7 @@ func activeSpeedStreams() int {
 func runSpeedJob(provider, id string) {
 	var result any
 	var err error
-	if readSettings().SessionCount == 3 && !fileExists(engineDir+"/config-3.yaml") {
+	if readSettings().SessionCount == 3 && engineSessionCount() < 3 {
 		err = prepareTripleSpeedSession()
 	}
 	if err != nil {
