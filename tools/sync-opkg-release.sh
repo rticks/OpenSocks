@@ -1,4 +1,12 @@
 #!/bin/sh
+# Publish the newest GitHub Release as the public feeds served by rel.n4t.su.
+#
+#   <publish_root>/opkg/        opkg feed (OpenWrt 22.03-24.10)
+#   <publish_root>/opkg/apk/    apk feed  (OpenWrt 25.12+), when the release
+#                               carries a packages.adb index
+#
+# The apk index and its .apk files must stay in one directory: mkndx records a
+# pkgname-spec so apk resolves ${name}-${version}-${arch}.apk beside the index.
 set -eu
 
 repository="${GITHUB_REPOSITORY:-NarYuki/OpenSocks}"
@@ -113,6 +121,90 @@ while read -r checksum relative; do
 	# below the document root, which makes opkg's immutable URL return 404.
 	ln "$stage/$name" "$stage/by-sha/$checksum/$name"
 done < "$stage/SHA256SUMS"
+
+# ---------------------------------------------------------------------------
+# OpenWrt 25.12 apk feed (optional)
+# ---------------------------------------------------------------------------
+# The apk feed is published under <publish_root>/opkg/apk/ so a 25.12 client
+# registers https://.../opkg/apk/packages.adb, next to the opkg index that
+# older routers keep using. mkndx records a pkgname-spec, so the .apk files must
+# sit in the same directory as packages.adb.
+#
+# Releases built before the apk feed existed simply have no packages.adb; that
+# is not an error, so skip the whole block when the index is absent.
+apk_stage="$stage/apk"
+apk_index_url="$base/packages.adb?cache=$cache_bust"
+if curl -fsL --retry 3 --connect-timeout 15 -o "$stage/.packages.adb" "$apk_index_url"; then
+	mkdir -p "$apk_stage"
+	mv "$stage/.packages.adb" "$apk_stage/packages.adb"
+
+	apk_metadata="packages.adb.gz opensocks.pem apk-SHA256SUMS"
+	for asset in $apk_metadata; do
+		# The public key and the manifests are expected; a missing .gz or
+		# manifest only means the producer skipped it.
+		curl -fsL --retry 3 --connect-timeout 15 \
+			-o "$apk_stage/$asset" "$base/$asset?cache=$cache_bust" || {
+			rm -f "$apk_stage/$asset"
+			case "$asset" in
+				opensocks.pem)
+					printf 'apk feed is unsigned (no opensocks.pem published)\n' >&2
+					;;
+				*)
+					printf 'apk asset not published, skipping: %s\n' "$asset" >&2
+					;;
+			esac
+		}
+	done
+
+	# Every package is named in the apk manifest. Using the manifest rather than
+	# guessing from the index keeps the allow-list strict.
+	if [ -f "$apk_stage/apk-SHA256SUMS" ]; then
+		apk_assets="$(awk '{ name=$2; sub(/^\.\//, "", name); if (name ~ /\.apk$/) print name }' \
+			"$apk_stage/apk-SHA256SUMS" | sort -u)"
+		[ -n "$apk_assets" ] || {
+			printf 'apk-SHA256SUMS lists no packages\n' >&2
+			exit 1
+		}
+		printf '%s\n' "$apk_assets" > "$stage/.apk-list"
+		while IFS= read -r asset; do
+			[ -n "$asset" ] || continue
+			case "$asset" in
+				opensocks-${version}-r*.apk) ;;
+				opensocks-minimal-${version}-r*.apk) ;;
+				luci-app-opensocks-${version}-r*.apk) ;;
+				*)
+					printf 'Unexpected apk release asset: %s\n' "$asset" >&2
+					exit 1
+					;;
+			esac
+			curl -fL --retry 3 --connect-timeout 15 \
+				-o "$apk_stage/$asset" "$base/$asset?cache=$cache_bust"
+		done < "$stage/.apk-list"
+		rm -f "$stage/.apk-list"
+		(cd "$apk_stage" && sha256sum -c apk-SHA256SUMS)
+	else
+		# Without a manifest fall back to whatever .apk files the release has,
+		# so an older-style publish still upgrades clients.
+		apk_assets="$(awk '{ name=$2; sub(/^\.\//, "", name); if (name ~ /\.apk$/) print name }' \
+			"$stage/SHA256SUMS" | sort -u)"
+		if [ -n "$apk_assets" ]; then
+			printf '%s\n' "$apk_assets" > "$stage/.apk-list"
+			while IFS= read -r asset; do
+				[ -n "$asset" ] || continue
+				curl -fL --retry 3 --connect-timeout 15 \
+					-o "$apk_stage/$asset" "$base/$asset?cache=$cache_bust"
+			done < "$stage/.apk-list"
+			rm -f "$stage/.apk-list"
+		fi
+	fi
+
+	printf 'apk feed staged with %s package(s)\n' \
+		"$(find "$apk_stage" -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ')"
+else
+	rm -f "$stage/.packages.adb"
+	printf 'No apk index in this release; publishing the opkg feed only\n' >&2
+	rmdir "$apk_stage" 2>/dev/null || true
+fi
 
 find "$stage" -type d -exec chmod 0755 {} +
 find "$stage" -type f -exec chmod 0644 {} +

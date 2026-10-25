@@ -1,8 +1,8 @@
-#!/bin/sh
+﻿#!/bin/sh
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-0.2.13}"
+VERSION="${VERSION:-0.3.0}"
 RELEASE="${RELEASE:-1}"
 OUT="${RELEASE_DIR:-$ROOT/../release/$VERSION}"
 WORK="$(mktemp -d)"
@@ -95,7 +95,7 @@ while IFS= read -r target; do
 		cat > "$daemon_control/control" <<EOF
 Package: opensocks
 Version: ${VERSION}-${RELEASE}
-Depends: libc, shadowsocks-libev-ss-redir, shadowsocks-libev-ss-local, nftables-json, kmod-nft-tproxy, ca-bundle, uci
+Depends: libc, nftables-json, kmod-nft-tproxy, ca-bundle, uci
 Source: opensocks
 Section: net
 Architecture: ${ipk_arch}
@@ -158,7 +158,7 @@ mkdir -p "$minimal_control" "$minimal_data/etc/init.d" "$minimal_data/etc/config
 cat > "$minimal_control/control" <<EOF
 Package: opensocks-minimal
 Version: ${VERSION}-${RELEASE}
-Depends: libc, shadowsocks-libev-ss-redir, shadowsocks-libev-ss-local, nftables-json, kmod-nft-tproxy, ca-bundle, uci, wget-ssl, usign
+Depends: libc, nftables-json, kmod-nft-tproxy, ca-bundle, uci, wget-ssl, usign
 X-OpenSocks-Binary-SHA256: $default_sha
 X-OpenSocks-Binary-URL: $default_url
 ${arch_control_extra}Source: opensocks-minimal
@@ -283,8 +283,82 @@ elif [ "${REQUIRE_SIGNATURE:-0}" = "1" ]; then
 	exit 1
 fi
 
+# Build the OpenWrt 25.12 apk repository beside the opkg feed. Both feeds are
+# produced from the same release directory so the artifacts stay in lockstep.
+#
+# Apk tooling is optional: a developer without apk-tools still gets a complete
+# opkg release. The step is skipped with a clear message unless BUILD_APK=1 was
+# requested explicitly, in which case a missing apk binary is a hard failure.
+build_apk_repo() {
+	APK_BIN="${APK_BIN:-}"
+	apk_key_dir="${APK_KEY_DIR:-}"
+
+	if [ -z "$APK_BIN" ] && [ -n "${APK_TOOLS_DIR:-}" ]; then
+		APK_BIN="$APK_TOOLS_DIR/apk"
+	fi
+	if [ -z "$APK_BIN" ]; then
+		APK_BIN="$(command -v apk 2>/dev/null || true)"
+	fi
+
+	if [ -z "$APK_BIN" ] || [ ! -x "$APK_BIN" ]; then
+		if [ "${BUILD_APK:-auto}" = "1" ]; then
+			printf 'BUILD_APK=1 but no apk binary was found.\n' >&2
+			printf 'Set APK_BIN or APK_TOOLS_DIR, or build one with tools/build-apk-tool.sh.\n' >&2
+			exit 1
+		fi
+		printf 'Skipping apk packages: no apk-tools binary found.\n'
+		printf 'Install apk-tools or run tools/build-apk-tool.sh, then set APK_BIN.\n'
+		return 0
+	fi
+
+	# A signing key is required for a publishable repository. APK_KEY_DIR is a
+	# convenience for a directory holding private.pem/public.pem.
+	if [ -z "${APK_SIGNING_KEY_FILE:-}" ] && [ -n "$apk_key_dir" ]; then
+		APK_SIGNING_KEY_FILE="$apk_key_dir/private.pem"
+		APK_PUBLIC_KEY_FILE="${APK_PUBLIC_KEY_FILE:-$apk_key_dir/public.pem}"
+	fi
+	if [ -z "${APK_SIGNING_KEY_FILE:-}" ] && [ -n "${APK_SIGNING_KEY:-}" ]; then
+		# Same convention as the usign secret: a raw key in an environment var.
+		umask 077
+		printf '%s\n' "$APK_SIGNING_KEY" > "$WORK/opensocks-apk.sec"
+		APK_SIGNING_KEY_FILE="$WORK/opensocks-apk.sec"
+	fi
+
+	# REQUIRE_SIGNATURE covers the usign/opkg feed. The apk feed is optional by
+	# design: a release without an EC key still ships opkg and an unsigned apk
+	# index. So only demand an apk signature when a key was actually supplied,
+	# unless APK_REQUIRE_SIGNATURE overrides that explicitly.
+	apk_require="${APK_REQUIRE_SIGNATURE:-0}"
+	if [ -z "${APK_REQUIRE_SIGNATURE:-}" ] && [ -n "${APK_SIGNING_KEY_FILE:-}" ]; then
+		apk_require=1
+	fi
+
+	APK_SIGNING_KEY_FILE="${APK_SIGNING_KEY_FILE:-}" \
+	APK_PUBLIC_KEY_FILE="${APK_PUBLIC_KEY_FILE:-}" \
+	REQUIRE_SIGNATURE="$apk_require" \
+	FEED_BASE="$FEED_BASE" \
+	OPENSOCKS_TARGETS="$TARGETS" \
+		"$ROOT/tools/build-apk-repo.sh" \
+			"$OUT" "$VERSION" "$RELEASE" "$APK_BIN" "" || return 1
+
+	# The apk feed is served from <feed-base>/apk/ so the URL does not collide
+	# with the opkg index that lives at the feed root. tools/sync-opkg-release.sh
+	# publishes it there; keep this default in step with that script and the
+	# README install instructions.
+	apk_base="${APK_FEED_BASE:-$FEED_BASE/apk}"
+	printf '\napk repository published under %s\n' "$OUT/repo"
+	printf '  install the key:  wget -O /etc/apk/keys/opensocks.pem %s/opensocks.pem\n' "$apk_base"
+	printf '  register the feed: echo %s/packages.adb >> /etc/apk/repositories.d/customfeeds.list\n' "$apk_base"
+	printf '  install:          apk update && apk add opensocks-minimal luci-app-opensocks\n'
+}
+
 write_checksums() {
 	( cd "$OUT" && find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig -print | sort | xargs shasum -a 256 > SHA256SUMS )
+	# The apk repository lives in repo/ so it gets its own manifest; the flat
+	# opkg manifest above keeps its maxdepth-1 behaviour untouched.
+	if [ -d "$OUT/repo" ]; then
+		( cd "$OUT/repo" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print | sort | xargs shasum -a 256 > SHA256SUMS )
+	fi
 	if [ -n "$SIGNING_KEY" ]; then
 		"$USIGN_BIN" -S -m "$OUT/SHA256SUMS" -s "$SIGNING_KEY" -x "$OUT/SHA256SUMS.sig"
 		"$USIGN_BIN" -V -m "$OUT/SHA256SUMS" -p "$PUBLIC_KEY" -x "$OUT/SHA256SUMS.sig"
@@ -292,6 +366,7 @@ write_checksums() {
 }
 
 if [ "${OPENWRT_ONLY:-0}" = "1" ]; then
+	build_apk_repo
 	write_checksums
 	printf 'OpenWrt release artifacts written to %s\n' "$OUT"
 	exit 0
@@ -299,5 +374,6 @@ fi
 
 ( cd "$ROOT/mobile" && flutter build apk --release )
 cp "$ROOT/mobile/build/app/outputs/flutter-apk/app-release.apk" "$OUT/OpenSocks-${VERSION}-android.apk"
+build_apk_repo
 write_checksums
 printf 'Release artifacts written to %s\n' "$OUT"

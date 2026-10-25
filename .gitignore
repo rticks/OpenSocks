@@ -19,10 +19,18 @@ mobile/android/.kotlin/
 *.aab
 *.zip
 *.ipk
-*.apk
 *.bin
 *.gz
 openwrt/opensocks/src/opensocks
+# Go binaries built locally (the daemon's module name is dev.opensocks.daemon).
+openwrt/opensocks/src/dev.opensocks.daemon
+openwrt/opensocks/src/dev.opensocks.daemon.exe
+*.exe
+
+# Android app bundle. OpenWrt .apk packages are build outputs too, but they land
+# in release/, so this pattern is scoped to the mobile tree to keep an .apk
+# fixture in openwrt/ committable if one is ever added.
+mobile/**/*.apk
 
 # Runtime configuration and credentials
 etc/opensocks/

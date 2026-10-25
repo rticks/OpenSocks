@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   build:
-    name: OpenWrt IPK and opkg feed
+    name: OpenWrt IPK, apk and feeds
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: write
 
@@ -32,7 +32,12 @@ jobs:
           cache: false
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git gzip tar
+        run: |
+          sudo apt-get update
+          # meson, ninja, pkg-config and the OpenSSL/zlib headers build apk-tools.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake git gzip tar \
+            meson ninja-build pkg-config libssl-dev zlib1g-dev
 
       - name: Build pinned OpenWrt usign
         run: |
@@ -41,12 +46,33 @@ jobs:
           cmake -S "${RUNNER_TEMP}/usign" -B "${RUNNER_TEMP}/usign/build" -DCMAKE_BUILD_TYPE=Release
           cmake --build "${RUNNER_TEMP}/usign/build" --parallel
 
+      - name: Build pinned apk-tools
+        env:
+          APK_TOOLS_DIR: ${{ runner.temp }}/apk-tools-bin
+        run: |
+          # apk-tools 3.0.5 at the commit openwrt/openwrt openwrt-25.12 pins.
+          # The script pins that commit itself; APK_TOOLS_DIR is only where the
+          # binary is installed. It also checks mkpkg/mkndx/adbsign and
+          # round-trips a throwaway package, so a broken OpenSSL/zlib link fails
+          # here instead of during the release build.
+          ./tools/build-apk-tool.sh "$APK_TOOLS_DIR"
+          "$APK_TOOLS_DIR/apk" --version
+
       - name: Build OpenWrt packages
         env:
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          # Optional EC P-256 key pair for apk v3 index signing. Without it the
+          # apk feed is still built but stays unsigned, and clients must install
+          # with --allow-untrusted. A missing apk key never fails the workflow,
+          # so the opkg feed keeps shipping.
+          APK_SIGNING_KEY_PEM: ${{ secrets.APK_SIGNING_KEY_PEM }}
+          APK_PUBLIC_KEY_PEM: ${{ secrets.APK_PUBLIC_KEY_PEM }}
+          BUILD_APK: "1"
+          APK_BIN: ${{ runner.temp }}/apk-tools-bin/apk
           OPENWRT_ONLY: "1"
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
         run: |
+          set -eu
           test -n "$OPKG_SIGNING_KEY" || { echo 'OPKG_SIGNING_KEY secret is required' >&2; exit 1; }
           VERSION="$(sed -n 's/^PKG_VERSION:=//p' openwrt/opensocks/Makefile)"
           RELEASE="$(sed -n 's/^PKG_RELEASE:=//p' openwrt/opensocks/Makefile)"
@@ -60,7 +86,18 @@ jobs:
           done
           umask 077
           printf '%s\n' "$OPKG_SIGNING_KEY" > "${RUNNER_TEMP}/opensocks-usign.sec"
+          # Materialise the apk key pair when the secrets exist. build-release.sh
+          # picks these up via APK_SIGNING_KEY_FILE / APK_PUBLIC_KEY_FILE.
+          if [ -n "${APK_SIGNING_KEY_PEM}" ] && [ -n "${APK_PUBLIC_KEY_PEM}" ]; then
+            printf '%s\n' "$APK_SIGNING_KEY_PEM" > "${RUNNER_TEMP}/opensocks-apk.sec"
+            printf '%s\n' "$APK_PUBLIC_KEY_PEM" > "${RUNNER_TEMP}/opensocks-apk.pub"
+            export APK_SIGNING_KEY_FILE="${RUNNER_TEMP}/opensocks-apk.sec"
+            export APK_PUBLIC_KEY_FILE="${RUNNER_TEMP}/opensocks-apk.pub"
+          else
+            echo 'APK_SIGNING_KEY_PEM not set: publishing an UNSIGNED apk feed' >&2
+          fi
           OPENWRT_ONLY=1 \
+          BUILD_APK=1 \
           REQUIRE_SIGNATURE=1 \
           RELEASE_DIR="$RELEASE_DIR" \
           VERSION="$VERSION" \
@@ -74,6 +111,7 @@ jobs:
         env:
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
         run: |
+          set -eu
           test -s "$RELEASE_DIR/Packages"
           test -s "$RELEASE_DIR/Packages.gz"
           test -s "$RELEASE_DIR/Packages.sig"
@@ -89,10 +127,45 @@ jobs:
           test -n "$(find "$RELEASE_DIR" -maxdepth 1 -name 'opensocks_*_aarch64_cortex-a53*.ipk')"
           grep -q 'X-OpenSocks-Binary-SHA256-arm64:' "$RELEASE_DIR/Packages"
           grep -q 'X-OpenSocks-Binary-URL-arm64:' "$RELEASE_DIR/Packages"
+          # The packages must no longer pull in the removed proxy engines.
+          if grep -q 'shadowsocks-libev\|ss-redir\|ss-local\|mihomo\|sing-box\|redsocks' "$RELEASE_DIR/Packages"; then
+            echo 'opkg Packages still reference a removed proxy engine' >&2
+            exit 1
+          fi
           gzip -t "$RELEASE_DIR/Packages.gz"
           (cd "$RELEASE_DIR" && shasum -a 256 -c SHA256SUMS)
           "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/Packages" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/Packages.sig"
           "${RUNNER_TEMP}/usign/build/usign" -V -m "$RELEASE_DIR/SHA256SUMS" -p "$GITHUB_WORKSPACE/keys/d24a5e234001294c" -x "$RELEASE_DIR/SHA256SUMS.sig"
+
+      - name: Verify apk feed
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/opensocks-release
+          APK_BIN: ${{ runner.temp }}/apk-tools-bin/apk
+        run: |
+          set -eu
+          # build-apk-repo.sh already verified the index, every package and an
+          # install into a throwaway root. Re-assert the layout here so a change
+          # in that script cannot silently drop an artifact.
+          test -s "$RELEASE_DIR/repo/packages.adb"
+          test -s "$RELEASE_DIR/repo/packages.adb.gz"
+          apk_count="$(find "$RELEASE_DIR/repo" -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ')"
+          test "$apk_count" -ge 3
+          test -n "$(find "$RELEASE_DIR/repo" -maxdepth 1 -name 'opensocks-*-mipsel_24kc.apk')"
+          test -n "$(find "$RELEASE_DIR/repo" -maxdepth 1 -name 'opensocks-*-aarch64_cortex-a53.apk')"
+          test -n "$(find "$RELEASE_DIR/repo" -maxdepth 1 -name 'opensocks-minimal-*-noarch.apk')"
+          test -n "$(find "$RELEASE_DIR/repo" -maxdepth 1 -name 'luci-app-opensocks-*-noarch.apk')"
+          # Vendor-only opkg arch aliases must not leak into the apk feed.
+          if find "$RELEASE_DIR/repo" -maxdepth 1 -name '*_neon-vfpv4.apk' | grep -q .; then
+            echo 'apk feed contains an opkg-only vendor arch alias' >&2
+            exit 1
+          fi
+          "$APK_BIN" verify "$RELEASE_DIR/repo/packages.adb"
+          for apk in "$RELEASE_DIR/repo"/*.apk; do "$APK_BIN" verify "$apk"; done
+          if [ -f "$RELEASE_DIR/repo/opensocks.pem" ]; then
+            echo 'apk feed is signed'
+          else
+            echo 'apk feed is UNSIGNED (APK_SIGNING_KEY_PEM secret not configured)' >&2
+          fi
 
       - name: Upload OpenWrt artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -108,10 +181,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_DIR: ${{ runner.temp }}/opensocks-release
         run: |
+          set -eu
           case "$GITHUB_REF_NAME" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "Invalid release tag: $GITHUB_REF_NAME" >&2; exit 1;; esac
           ./tools/release-notes.sh "$GITHUB_REF_NAME" > "${RUNNER_TEMP}/release-notes.md"
           test -s "${RUNNER_TEMP}/release-notes.md"
-          gh release create "$GITHUB_REF_NAME" "$RELEASE_DIR"/* \
+
+          # "$RELEASE_DIR"/* only expands to top-level files, which would leave
+          # the whole apk feed (repo/) unpublished. Collect the flat opkg assets
+          # and the apk feed contents into one staging dir, then upload that.
+          # The apk feed is a flat directory by design (see PKGNAME_SPEC in
+          # tools/build-apk-repo.sh), so dropping it into the release root keeps
+          # packages.adb resolving the .apk files next to it.
+          assets="${RUNNER_TEMP}/release-assets"
+          rm -rf "$assets"
+          mkdir -p "$assets"
+          find "$RELEASE_DIR" -maxdepth 1 -type f -exec cp {} "$assets/" \;
+          if [ -d "$RELEASE_DIR/repo" ]; then
+            # repo/ carries its own SHA256SUMS, which would clobber the opkg one
+            # because release assets are flat. The apk index authenticates every
+            # package by hash inside the ADB itself, so rename the apk manifest
+            # instead of dropping it.
+            find "$RELEASE_DIR/repo" -maxdepth 1 -type f ! -name SHA256SUMS \
+              -exec cp {} "$assets/" \;
+            if [ -f "$RELEASE_DIR/repo/SHA256SUMS" ]; then
+              cp "$RELEASE_DIR/repo/SHA256SUMS" "$assets/apk-SHA256SUMS"
+            fi
+          fi
+          test -s "$assets/packages.adb" || {
+            echo 'apk index is missing from the release assets' >&2
+            exit 1
+          }
+          gh release create "$GITHUB_REF_NAME" "$assets"/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "OpenSocks ${GITHUB_REF_NAME#v}" \
