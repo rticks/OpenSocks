@@ -39,6 +39,24 @@ jobs:
             build-essential ca-certificates cmake git gzip tar \
             meson ninja-build pkg-config libssl-dev zlib1g-dev
 
+      - name: Check architecture detection without od
+        run: |
+          # OpenWrt's stock BusyBox has CONFIG_OD unset, so "od" is absent on a
+          # default install while hexdump is present. Run the detectors against a
+          # real BusyBox built the same way: no od, hexdump available. This
+          # guards the launcher and BOTH generated post-install scripts.
+          set -eu
+          sudo apt-get install -y --no-install-recommends busybox-static
+          busybox --list | grep -qx hexdump || {
+            echo 'busybox build lacks hexdump; the detectors depend on it' >&2
+            exit 1
+          }
+          mkdir -p "${RUNNER_TEMP}/nood"
+          # An empty directory placed first on PATH makes "od" unresolvable even
+          # though the host has it, exactly like the router.
+          PATH="${RUNNER_TEMP}/nood:${PATH}" busybox sh \
+            openwrt/opensocks-minimal/tests/architecture_test.sh
+
       - name: Build pinned OpenWrt usign
         run: |
           git clone --no-checkout https://git.openwrt.org/project/usign.git "${RUNNER_TEMP}/usign"
