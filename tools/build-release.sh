@@ -62,7 +62,13 @@ build_go_binary() {
 TARGETS="${OPENSOCKS_TARGETS:-mipsle:softfloat mipsle mipsel_24kc;arm64 arm64 aarch64_cortex-a53 aarch64_cortex-a53_neon-vfpv4}"
 
 TARGETS_NORMALIZED="$(printf '%s' "$TARGETS" | tr '\n' ';' | sed 's/;;*/;/g; s/^;//; s/;$//')"
+# The trailing newline is load-bearing: "while IFS= read -r target" silently
+# DROPS a final line that has no newline, which would drop the last target
+# (arm64) and build only the first architecture.
 printf '%s\n' "$TARGETS_NORMALIZED" | tr ';' '\n' > "$WORK/targets.txt"
+if [ -n "$(tail -c 1 "$WORK/targets.txt")" ]; then
+	printf '\n' >> "$WORK/targets.txt"
+fi
 
 : > "$WORK/suffixes"
 while IFS= read -r target; do
@@ -339,11 +345,14 @@ build_apk_repo() {
 		return 0
 	fi
 
+	# Pass the NORMALISED target list: build-apk-repo.sh splits on ';' too, but
+	# the raw value can carry stray separators or newlines from the caller, and
+	# a malformed list silently drops architectures (aarch64 in particular).
 	APK_SIGNING_KEY_FILE="${APK_SIGNING_KEY_FILE:-}" \
 	APK_PUBLIC_KEY_FILE="${APK_PUBLIC_KEY_FILE:-}" \
 	REQUIRE_SIGNATURE=1 \
 	FEED_BASE="$FEED_BASE" \
-	OPENSOCKS_TARGETS="$TARGETS" \
+	OPENSOCKS_TARGETS="$TARGETS_NORMALIZED" \
 		"$ROOT/tools/build-apk-repo.sh" \
 			"$OUT" "$VERSION" "$RELEASE" "$APK_BIN" "" || return 1
 

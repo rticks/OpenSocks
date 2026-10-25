@@ -174,8 +174,14 @@ done
 # they are intentionally NOT emitted as .apk files. Mapped below.
 TARGETS="${OPENSOCKS_TARGETS:-mipsle:softfloat mipsle mipsel_24kc;arm64 arm64 aarch64_cortex-a53 aarch64_cortex-a53_neon-vfpv4}"
 
-printf '%s' "$TARGETS" | tr '\n' ';' | sed 's/;;*/;/g; s/^;//; s/;$//' |
+# The trailing newline is load-bearing: "while IFS= read -r target" silently
+# DROPS a final line that has no newline, which would drop the last target
+# (arm64) and build only the first architecture.
+printf '%s\n' "$TARGETS" | tr '\n' ';' | sed 's/;;*/;/g; s/^;//; s/;$//' |
 	tr ';' '\n' > "$WORK/targets.txt"
+if [ -n "$(tail -c 1 "$WORK/targets.txt")" ]; then
+	printf '\n' >> "$WORK/targets.txt"
+fi
 
 # Map an opkg architecture string onto the apk architecture string that
 # OpenWrt 25.12 uses in its feeds. Vendor suffixes such as _neon-vfpv4 are
@@ -353,6 +359,10 @@ build_apk() {
 	#
 	# The caller's remaining arguments (--script TYPE:FILE) stay in "$@" and are
 	# appended after the generated ones.
+	# </dev/null matters: build_apk runs inside "while read ... done < targets.txt",
+	# and a child that reads stdin consumes the target list, silently dropping
+	# every architecture after the first. mkpkg has no reason to read stdin, but
+	# redirecting is the only way to be sure.
 	"$APK_BIN" mkpkg \
 		${SIGNING_KEY:+--sign-key="$SIGNING_KEY"} \
 		--info "name:$name" \
@@ -368,7 +378,7 @@ build_apk() {
 		"$@" \
 		--files "$stage" \
 		--output "$out" \
-		--xattrs=no
+		--xattrs=no </dev/null
 	[ -s "$out" ] || {
 		printf 'apk mkpkg produced no package: %s\n' "$out" >&2
 		exit 1
