@@ -287,7 +287,13 @@ EOF
 
 # build_apk <output> <name> <arch> <origin> <description> <depends> \
 #           <stage> [--script TYPE:FILE ...]
-# Dependency lists are comma separated; mkpkg splits them itself.
+# Dependency lists are SPACE separated. apk's ADB dependency parser
+# (src/sch_apk_adb.c dependencies_fromstring) splits on
+# APK_CTYPE_DEPENDENCY_SEPARATOR, which ctype.c defines as space and newline
+# only; a comma is an allowed *name* character. A comma-separated list is
+# therefore read as one enormous package name, and mkpkg rejects it with
+# "info field 'depends' has invalid value". OpenWrt's include/package-pack.mk
+# converts its own comma lists to spaces for exactly this reason.
 build_apk() {
 	out="$1"
 	name="$2"
@@ -332,7 +338,7 @@ build_apk() {
 # kmods feed rather than the generic arch feed, so a client that has not
 # registered its target's kmods feed cannot resolve it. That is normal for
 # OpenWrt packages that need a kernel module.
-DAEMON_DEPENDS='libc,nftables-json,kmod-nft-tproxy,ca-bundle,uci'
+DAEMON_DEPENDS='libc nftables-json kmod-nft-tproxy ca-bundle uci'
 
 # apk has no OR dependencies, so the "opensocks | opensocks-minimal" that the
 # opkg LuCI package used has to be modelled with a virtual name. A *versioned*
@@ -341,6 +347,11 @@ DAEMON_DEPENDS='libc,nftables-json,kmod-nft-tproxy,ca-bundle,uci'
 # they conflict so only one is ever installed. provider-priority is not needed
 # here because nothing installs the virtual name implicitly; the LuCI package
 # depends on it explicitly.
+#
+# The value is a full dependency expression ("name=version"), which is what the
+# ADB provides field wants as well: apk parses both depends and provides with
+# apk_dep_parse, so an unversioned name would still work but would not conflict
+# with the other implementation.
 ENGINE_PROVIDE='opensocks-engine='"$VERSION"
 
 : > "$WORK/suffixes"
@@ -408,7 +419,7 @@ done < "$WORK/targets.txt"
 
 # Keeps the download tools the .ipk used (wget-ssl provides wget, usign verifies
 # the signed index); drops the proxy engines that no longer exist in 25.12.
-MINIMAL_DEPENDS='libc,nftables-json,kmod-nft-tproxy,ca-bundle,uci,wget-ssl,usign'
+MINIMAL_DEPENDS='libc nftables-json kmod-nft-tproxy ca-bundle uci wget-ssl usign'
 
 default_suffix="mipsle"
 if ! grep -qx "$default_suffix" "$WORK/suffixes"; then
@@ -470,7 +481,7 @@ printf 'built opensocks-minimal-%s-noarch.apk\n' "$APK_VERSION"
 # depends on: either implementation satisfies it, and because the provide is
 # versioned apk treats them as owners of one name, so they conflict and exactly
 # one gets installed.
-LUCIDEPENDS="libc,$ENGINE_PROVIDE,luci-base,luci-compat,luci-lua-runtime,curl"
+LUCIDEPENDS="libc $ENGINE_PROVIDE luci-base luci-compat luci-lua-runtime curl"
 
 luci_stage="$WORK/stage-luci"
 rm -rf "$luci_stage"
