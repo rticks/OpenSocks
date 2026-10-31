@@ -64,7 +64,7 @@ opkg install opensocks-minimal luci-app-opensocks
 
 `kmod-nft-tproxy` 来自目标平台的 kmods 源，而非通用 arch 源。若你的设备尚未注册对应的目标源，apk 会提示无法解析该依赖 —— 这与 OpenWrt 官方依赖内核模块的软件包行为一致。
 
-也可以从 [GitHub Releases](https://github.com/NarYuki/OpenSocks/releases/latest) 下载 IPK 后直接安装。完整的安装、登录、功能和手机配对说明请参阅：
+也可以从 [GitHub Releases](https://github.com/rticks/OpenSocks/releases/latest) 下载 IPK 后直接安装。完整的安装、登录、功能和手机配对说明请参阅：
 
 完整包现同时提供多种 CPU 架构（例如 `mipsel_24kc`、`aarch64_cortex-a53`、`aarch64_cortex-a53_neon-vfpv4`）。`opensocks-minimal` 在 IPK 中为 `Architecture: all`、在 apk 中为 `noarch`，会按 `uname -m` 自动选择对应的 daemon 二进制。
 
@@ -72,7 +72,7 @@ opkg install opensocks-minimal luci-app-opensocks
 - [English Wiki](https://github.com/NarYuki/OpenSocks/wiki/Home-en)
 - [日本語 Wiki](https://github.com/NarYuki/OpenSocks/wiki/Home-ja)
 
-手机应用：Android APK可从[最新Release](https://github.com/NarYuki/OpenSocks/releases/latest)下载；iOS版通过[TestFlight](https://testflight.apple.com/join/eT82PtM1)安装。
+手机应用：Android APK可从[最新Release](https://github.com/rticks/OpenSocks/releases/latest)下载；iOS版通过[TestFlight](https://testflight.apple.com/join/eT82PtM1)安装。
 
 ## 项目结构
 

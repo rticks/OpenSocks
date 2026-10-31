@@ -63,7 +63,7 @@ apk リポジトリでは `opensocks-minimal` と `luci-app-opensocks` は `noar
 
 `kmod-nft-tproxy` は汎用 arch リポジトリではなく、ターゲット別の kmods リポジトリにあります。対象ターゲットのリポジトリを未登録の場合、apk はこの依存を解決できません（カーネルモジュールに依存するOpenWrt 公式パッケージと同じ挙動です）。
 
-[GitHub Releases](https://github.com/NarYuki/OpenSocks/releases/latest)からIPKを直接ダウンロードしてインストールすることもできます。インストール、ログイン、機能、スマホ連携の詳しい説明:
+[GitHub Releases](https://github.com/rticks/OpenSocks/releases/latest)からIPKを直接ダウンロードしてインストールすることもできます。インストール、ログイン、機能、スマホ連携の詳しい説明:
 
 完全版パッケージは複数 CPU アーキテクチャ向けに公開されます（例: `mipsel_24kc`、`aarch64_cortex-a53`、`aarch64_cortex-a53_neon-vfpv4`）。`opensocks-minimal` は IPK では `Architecture: all`、apk では `noarch` となり、`uname -m` に応じた daemon バイナリを選択します。
 
@@ -71,7 +71,7 @@ apk リポジトリでは `opensocks-minimal` と `luci-app-opensocks` は `noar
 - [English Wiki](https://github.com/NarYuki/OpenSocks/wiki/Home-en)
 - [中文 Wiki](https://github.com/NarYuki/OpenSocks/wiki)
 
-スマホアプリは、Android版を[最新Release](https://github.com/NarYuki/OpenSocks/releases/latest)から、iOS版を[TestFlight](https://testflight.apple.com/join/eT82PtM1)からインストールできます。
+スマホアプリは、Android版を[最新Release](https://github.com/rticks/OpenSocks/releases/latest)から、iOS版を[TestFlight](https://testflight.apple.com/join/eT82PtM1)からインストールできます。
 
 ## 開発時の確認
 

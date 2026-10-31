@@ -68,7 +68,7 @@ In the apk feed `opensocks-minimal` and `luci-app-opensocks` are `noarch`; the f
 
 `kmod-nft-tproxy` ships in the per-target kmods feed rather than the generic arch feed. If your device has not registered its target's feed, apk cannot resolve that dependency — the same behaviour as any OpenWrt package that needs a kernel module.
 
-You can also download IPKs from [GitHub Releases](https://github.com/NarYuki/OpenSocks/releases/latest) and install them directly. Full installation, login, feature, and mobile-pairing documentation:
+You can also download IPKs from [GitHub Releases](https://github.com/rticks/OpenSocks/releases/latest) and install them directly. Full installation, login, feature, and mobile-pairing documentation:
 
 Full packages are published for multiple CPU architectures (for example `mipsel_24kc`, `aarch64_cortex-a53`, and `aarch64_cortex-a53_neon-vfpv4`). `opensocks-minimal` is `Architecture: all` in the IPK feed and `noarch` in the apk feed; it selects the matching daemon binary from `uname -m`.
 
@@ -76,7 +76,7 @@ Full packages are published for multiple CPU architectures (for example `mipsel_
 - [中文 Wiki](https://github.com/NarYuki/OpenSocks/wiki)
 - [日本語 Wiki](https://github.com/NarYuki/OpenSocks/wiki/Home-ja)
 
-Mobile app: download the Android APK from the [latest release](https://github.com/NarYuki/OpenSocks/releases/latest), or install the iOS app through [TestFlight](https://testflight.apple.com/join/eT82PtM1).
+Mobile app: download the Android APK from the [latest release](https://github.com/rticks/OpenSocks/releases/latest), or install the iOS app through [TestFlight](https://testflight.apple.com/join/eT82PtM1).
 
 ## Development checks
 
