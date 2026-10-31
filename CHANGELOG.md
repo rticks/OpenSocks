@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.6
+
+### Disconnect now stays disconnected
+
+- Fixed "Disconnect" appearing to do nothing. `POST /disconnect` returned `{"ok": true}` and really did tear the engine down, but `autoRouteWatchdog` reconnects whenever the engine is not running — that is what keeps the tunnel alive across a dropped upstream — so it dialled the control API again within one 10 s tick and restored the listeners and the nftables table. Measured on a 25.12.6 mipsle router: five seconds after a successful disconnect `activeSessionCount` was 1 again, both listeners on 7890/7891 were back, and the `inet opensocks` table had been recreated.
+- A manual disconnect now suspends automatic recovery. The flag is set before the engine is torn down, so a watchdog tick cannot slip in between the two steps, and it is cleared by any explicit connect, so reconnecting from the UI immediately re-arms recovery.
+- The suspension is bounded (`autoRoutePause`, two minutes). A disconnect the user forgot about must not leave the router without automatic recovery forever; once the pause elapses the watchdog is allowed to act again.
+- Added `disconnect_test.go`: it asserts a disconnect suspends recovery, that an explicit connect resumes it, that the pause expires and clears the flag, and that a disconnect genuinely stops the engine.
+
+### Packaging
+
+- Bumped `opensocks`, `opensocks-minimal` and `luci-app-opensocks` to 0.3.6.
+
 ## 0.3.5
 
 ### A permanent feed URL
