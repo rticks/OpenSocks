@@ -57,6 +57,16 @@ jobs:
           PATH="${RUNNER_TEMP}/nood:${PATH}" busybox sh \
             openwrt/opensocks-minimal/tests/architecture_test.sh
 
+      - name: Check the launcher does not reuse a stale binary
+        run: |
+          # A bare "the file exists, exec it" check made every package upgrade
+          # keep running the previous release's binary from tmpfs, because /tmp
+          # only resets on reboot. This drives the shipped fast-path condition
+          # against a stamped/unstamped cache and fails if a newer configured
+          # release would reuse the old binary.
+          set -eu
+          sh openwrt/opensocks-minimal/tests/launcher_cache_test.sh
+
       - name: Build pinned OpenWrt usign
         run: |
           git clone --no-checkout https://git.openwrt.org/project/usign.git "${RUNNER_TEMP}/usign"

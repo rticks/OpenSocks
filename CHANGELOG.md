@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.2
+
+### Traffic accounting and connection state
+
+- Fixed the traffic panel staying at zero while the tunnel moved gigabytes. On nftables 1.1.6 (OpenWrt 25.12) a multi-line `nft -f -` script resolves only the first `list counter` line and fails the rest with "No such file or directory; did you mean obj ...", so the command exited non-zero and the sampler read an empty map. It now issues one `nft list counters inet opensocks`, which dumps every counter in a single call. Reproduced and verified on a 25.12 mipsle router: the old form failed there and the new one returns `proxy_up`, `proxy_down` and every `svc_*` counter.
+- Fixed the UI reporting "Connected" while nothing could leave the router. `isRunning()` only proves the daemon owns its listening ports, and a bound listener survives an upstream that has stopped answering, so a router whose account had expired kept showing Connected forever. The engine now dials its upstream on the supervisor tick and caches the verdict for 25 s, and `status()` reports that verdict as `running`. The listener-only view is still available as `listenersBound`, so a diagnostic can tell "no listener" from "listener up, upstream dead". A dead upstream is logged so the failure is no longer silent.
+- Made automatic recovery handle the dead-upstream case. `connect()` returns early while the engine is running, so the watchdog's old `isRunning()` check could never re-establish a tunnel whose listeners were still bound but whose server had gone away. It now compares the upstream verdict and tears the engine down before reconnecting.
+- Tolerated one failed probe as a blip: the tunnel is declared down only after two consecutive failures (~60 s), so a single lost packet does not flap the UI to Disconnected.
+- Cleared the cached upstream verdict and failure count on stop, so reconnecting to a different server cannot inherit the previous server's reachability.
+
+### Minimal launcher
+
+- Fixed an installed package never taking effect. The launcher executed `/tmp/opensocks/opensocks` as soon as the file existed, without comparing it to the SHA-256 the package ships. `/tmp` is a tmpfs that survives a service restart (it only resets on reboot), so after the first boot every later package upgrade kept running the binary from the first install: `apk list -I` reported the new version while the daemon did not change. The launcher now records the release it unpacked in `/tmp/opensocks/opensocks.sha256` and only takes the fast path when that stamp matches the configured `binary_sha256`; otherwise it re-downloads. A binary with no stamp is never trusted.
+- Fixed "Text file busy" crash loops on restart. Both unpack paths wrote straight into the executable the previous daemon was still exiting from, so procd logged `exec: ... Text file busy` and counted crashes. The daemon is now unpacked to `opensocks.new` and renamed into place, and both rename failures are reported instead of ignored.
+- Added `openwrt/opensocks-minimal/tests/launcher_cache_test.sh`, which drives the shipped fast-path condition against stamped, unstamped and stale caches and asserts the unpack never writes into the running executable. It runs in CI next to the architecture test.
+- Documented the two URL layouts the launcher accepts and that the archive hash, not the URL, is the trust boundary.
+
+### Packaging
+
+- Bumped `opensocks`, `opensocks-minimal` and `luci-app-opensocks` to 0.3.2.
+
 ## 0.3.1
 
 ### OpenWrt 25.12 fixes for the minimal package

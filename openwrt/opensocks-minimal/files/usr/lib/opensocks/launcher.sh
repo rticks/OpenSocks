@@ -20,6 +20,11 @@ set -u
 dir=/tmp/opensocks
 program="$dir/opensocks"
 archive="$dir/opensocks.gz"
+# stamp records which binary_sha256 produced the currently unpacked daemon. It
+# is what makes the fast path safe: an upgrade changes binary_sha256, so the
+# stamp stops matching and the daemon is re-fetched instead of the previous
+# release's binary being reused from tmpfs after a service restart.
+stamp="$dir/opensocks.sha256"
 
 # Optional index refresh. On OpenWrt 22.03-24.10 the opkg mirror publishes a
 # usign-signed Packages file we can re-read to learn about newer builds. OpenWrt
@@ -153,17 +158,26 @@ download_and_verify() {
 		return 1
 	}
 	mv "$archive.part" "$archive"
+	# Unpack beside the target, then rename: an in-place write into a binary the
+	# previous daemon is still executing fails with "Text file busy".
 	gzip -dc "$archive" > "$program.new" || {
 		log "cannot decompress $archive"
 		rm -f "$program.new"
 		return 1
 	}
-	chmod 0755 "$program.new"
-	mv "$program.new" "$program"
+	chmod 0755 "$program.new" || {
+		rm -f "$program.new"
+		return 1
+	}
+	mv -f "$program.new" "$program" || {
+		log "cannot install the daemon binary at $program"
+		rm -f "$program.new"
+		return 1
+	}
+	# Record which release this binary came from, so the next service start can
+	# take the fast path without re-downloading.
+	printf '%s\n' "$sha" > "$stamp"
 }
-
-# If the daemon is already unpacked there is nothing to do.
-[ -x "$program" ] && exec "$program" --daemon
 
 mkdir -p "$dir"
 
@@ -172,8 +186,25 @@ binary_suffix="$(detect_binary_suffix)" || {
 	exit 1
 }
 
+configured_sha="$(uci -q get opensocks.settings.binary_sha256)"
+configured_url="$(uci -q get opensocks.settings.binary_url)"
+
+# Fast path: the daemon already unpacked from THIS release. The stamp proves it,
+# so a service restart skips the download and still cannot run a stale binary.
+#
+# The check has to be "the stamp names the configured release", not "the file
+# exists". /tmp is a tmpfs that only resets on reboot, so a bare existence check
+# made every package upgrade keep executing the previous release's binary — the
+# installed package changed while the daemon did not. Checked before
+# refresh_release_metadata so a restart does not wait on the network first.
+if [ -x "$program" ] && [ -s "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$configured_sha" ]; then
+	exec "$program" --daemon
+fi
+
 refresh_release_metadata || true
 
+# The index refresh may have moved binary_sha256 to a newer build; re-read so the
+# download below matches what UCI now says.
 configured_sha="$(uci -q get opensocks.settings.binary_sha256)"
 configured_url="$(uci -q get opensocks.settings.binary_url)"
 
@@ -197,8 +228,16 @@ n=1
 while :; do
 	if [ -s "$archive" ] &&
 		[ "$(sha256sum "$archive" 2>/dev/null | awk '{print $1}')" = "$configured_sha" ]; then
-		gzip -dc "$archive" > "$program" 2>/dev/null && chmod 0755 "$program" && break
-		rm -f "$program"
+		# Unpack beside the target and rename into place. Writing straight into
+		# "$program" fails with "Text file busy" whenever the previous daemon is
+		# still exiting, which procd then reports as a crash loop.
+		if gzip -dc "$archive" > "$program.new" 2>/dev/null; then
+			if chmod 0755 "$program.new" && mv -f "$program.new" "$program"; then
+				printf '%s\n' "$configured_sha" > "$stamp"
+				break
+			fi
+		fi
+		rm -f "$program.new" "$program"
 	fi
 	download_and_verify "$binary_suffix" && break
 	if [ "$n" -ge "$attempts" ]; then

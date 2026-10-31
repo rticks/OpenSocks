@@ -466,7 +466,12 @@ func (c *controller) status() map[string]any {
 	acc := loadAccount()
 	lanDevice, routingApplied := networkIntegrationState()
 	return map[string]any{
-		"running":            c.engine.isRunning(),
+		// "running" is what the UI renders as Connected, so it must mean the
+		// tunnel actually works, not merely that the daemon owns its ports. The
+		// listener-only view is reported separately as "listenersBound" so a
+		// diagnostic can tell "no listener" from "listener up, upstream dead".
+		"running":            c.engine.upstreamReachable(),
+		"listenersBound":     c.engine.isRunning(),
 		"lineID":             c.engine.lineID,
 		"lineName":           c.engine.lineName,
 		"token":              cfg.Token != "",
@@ -521,29 +526,42 @@ func (c *controller) autoRouteWatchdog() {
 		if !cfg.AutoRoute {
 			continue
 		}
-		if !c.engine.isRunning() {
-			if time.Now().Before(nextAttempt) {
-				continue
-			}
-			if c.loggedIn() {
-				if err := c.connect(-1); err != nil {
-					logf("automatic connection recovery failed: %v", err)
-					nextAttempt = time.Now().Add(backoff)
-					backoff *= 2
-					if backoff > 5*time.Minute {
-						backoff = 5 * time.Minute
-					}
-				} else {
-					backoff, nextAttempt = 10*time.Second, time.Time{}
+		// Two distinct failures need recovery. "Listeners gone" is the obvious
+		// one. "Listeners bound but the upstream no longer answers" is the one
+		// that used to be missed: connect() returns early when the engine is
+		// running, so a dead upstream never triggered a reconnect and the UI
+		// kept claiming Connected. Tearing the engine down first is what makes
+		// connect() take the full path again.
+		listenersUp := c.engine.isRunning()
+		if listenersUp && c.engine.upstreamReachable() {
+			_, applied := networkIntegrationState()
+			if !applied {
+				if err := setupRedirect(cfg.Mode, c.engine.serverAddresses(), c.engine.activeSessionCount()); err != nil {
+					logf("automatic routing recovery failed: %v", err)
 				}
 			}
 			continue
 		}
-		_, applied := networkIntegrationState()
-		if c.engine.isRunning() && !applied {
-			if err := setupRedirect(cfg.Mode, c.engine.serverAddresses(), c.engine.activeSessionCount()); err != nil {
-				logf("automatic routing recovery failed: %v", err)
+		if time.Now().Before(nextAttempt) {
+			continue
+		}
+		if !c.loggedIn() {
+			continue
+		}
+		if listenersUp {
+			logf("upstream is unreachable while listeners are bound; reconnecting")
+			c.engine.stop()
+			teardownRedirect()
+		}
+		if err := c.connect(-1); err != nil {
+			logf("automatic connection recovery failed: %v", err)
+			nextAttempt = time.Now().Add(backoff)
+			backoff *= 2
+			if backoff > 5*time.Minute {
+				backoff = 5 * time.Minute
 			}
+		} else {
+			backoff, nextAttempt = 10*time.Second, time.Time{}
 		}
 	}
 }
