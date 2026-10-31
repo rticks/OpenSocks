@@ -6,14 +6,19 @@
 # That keeps the installed footprint small, which is the whole point of the
 # "minimal" variant.
 #
-# Two URL layouts are accepted:
+# The release assets live on GitHub Releases at a URL that names the tag:
+#
+#   https://github.com/<owner>/<repo>/releases/download/v<version>/<asset>
+#
+# The package's post-install bakes that URL in, so the pin always names the
+# release the package was built from. Two file layouts appear in UCI:
 #
 #   <base>/opensocks-linux-<suffix>.gz               flat (GitHub Releases)
 #   <base>/by-sha/<sha256>/opensocks-linux-<suffix>.gz  content addressed
 #
-# The second is what the rel.n4t.su mirror uses so a CDN can cache forever; the
-# first is what a plain release download looks like. Either way the archive is
-# verified against the configured SHA-256 before anything is executed, so the
+# The second is what the legacy rel.n4t.su mirror used so a CDN could cache
+# forever; the first is what a GitHub Release looks like. Either way the archive
+# is verified against the configured SHA-256 before anything is executed, so the
 # URL itself is not a trust boundary.
 set -u
 
@@ -26,12 +31,14 @@ archive="$dir/opensocks.gz"
 # release's binary being reused from tmpfs after a service restart.
 stamp="$dir/opensocks.sha256"
 
-# Optional index refresh. On OpenWrt 22.03-24.10 the opkg mirror publishes a
-# usign-signed Packages file we can re-read to learn about newer builds. OpenWrt
-# 25.12 has neither opkg nor usign, so this is skipped there and the URL baked in
-# by post-install is used as-is.
-feed="${OPENSOCKS_FEED:-https://rel.n4t.su/opkg}"
-feed_key="${OPENSOCKS_FEED_KEY:-/etc/opkg/keys/d24a5e234001294c}"
+# Optional index refresh, used ONLY to fill in a pin that is missing or
+# malformed. The feed is the project's own release feed, which is stable across
+# versions: "releases/latest" always resolves to the newest published release, so
+# the same line keeps working after every upgrade. It is not a trust anchor (the
+# archive hash is), and it cannot overwrite an installed pin - see
+# refresh_release_metadata.
+feed="${OPENSOCKS_FEED:-https://github.com/rticks/OpenSocks/releases/latest/download}"
+feed_key="${OPENSOCKS_FEED_KEY:-/etc/apk/keys/opensocks.pem}"
 
 attempts=5
 retry_delay=10
@@ -93,23 +100,46 @@ binary_url_matches() {
 	return 1
 }
 
-# Best effort: only runs where a usign-signed opkg index is actually available.
+# A well-formed pin is "64 lowercase hex" plus a URL. Anything else is treated as
+# absent and may be filled in from the feed.
+pin_is_usable() {
+	[ ${#1} -eq 64 ] || return 1
+	[ -n "$2" ] || return 1
+	case "$1" in *[!0-9a-f]*) return 1;; esac
+	return 0
+}
+
+# Fill in a MISSING or MALFORMED pin from the release feed. This is a fallback,
+# never the source of truth.
 #
-# This is a FALLBACK for a router with no usable pin, not the source of truth.
-# The package's post-install pins the URL and SHA-256 of the release it was built
-# from, and that pin is what the user installed. An index refresh used to rewrite
-# those values unconditionally, which on a 25.12.6 router undid a package upgrade:
-# "apk add --upgrade" set binary_url to the v0.3.3 asset, then the next service
-# start read the stale rel.n4t.su index (which still advertises 0.2.13), wrote
-# 0.2.13's URL and SHA back into UCI, and kept running the old daemon while apk
-# reported the new version installed. The refresh now only fills in a pin that is
-# missing or malformed, so it can never move an installed release backwards. A
-# router that wants a newer build upgrades the package, whose post-install (and
-# post-upgrade) repins it.
+# The package's post-install (and post-upgrade) pins the URL and SHA-256 of the
+# release it was built from, and that pin is what the user installed. This
+# function used to rewrite those values unconditionally from a usign-signed opkg
+# mirror, which on a 25.12.6 router undid a package upgrade: "apk add --upgrade"
+# set binary_url to the v0.3.3 asset, then the next service start read the stale
+# rel.n4t.su index (still advertising 0.2.13), wrote 0.2.13's URL and SHA back
+# into UCI, and kept running the old daemon while apk reported 0.3.3 installed.
+# A usable pin is therefore left untouched.
+#
+# The feed itself is now the project's own release feed ("releases/latest"), so a
+# single registration line keeps working across every version.
 refresh_release_metadata() {
+	# Check the installed pin BEFORE touching the network. On a normal install the
+	# post-install already pinned a release, so this returns immediately and a
+	# boot costs no extra request.
+	current_sha="$(uci -q get opensocks.settings.binary_sha256)"
+	current_url="$(uci -q get opensocks.settings.binary_url)"
+	pin_is_usable "$current_sha" "$current_url" && return 0
+
+	suffix="$(detect_binary_suffix)" || return 1
+
+	# The per-architecture URL/SHA are published as X-OpenSocks-* fields, which
+	# only the opkg Packages file carries: the apk index is a signed ADB and does
+	# not expose them (verified with "apk adbdump" - no X-OpenSocks fields appear).
+	# So the fallback reads Packages, which is usign-signed, and therefore only
+	# runs where usign exists.
 	command -v usign >/dev/null 2>&1 || return 1
 	[ -s "$feed_key" ] || return 1
-	suffix="$(detect_binary_suffix)" || return 1
 	rm -f "$dir/Packages.new" "$dir/Packages.sig.new"
 	wget -q -O "$dir/Packages.new" "$feed/Packages" || {
 		rm -f "$dir/Packages.new" "$dir/Packages.sig.new"
@@ -134,20 +164,15 @@ refresh_release_metadata() {
 		new_sha="$(package_field X-OpenSocks-Binary-SHA256)"
 		new_url="$(package_field X-OpenSocks-Binary-URL)"
 	fi
-	[ ${#new_sha} -eq 64 ] || return 1
-	case "$new_sha" in *[!0-9a-f]*) return 1;; esac
+	pin_is_usable "$new_sha" "$new_url" || return 1
 	binary_url_matches "$new_url" "$new_sha" "$suffix" || return 1
 
-	# Never overwrite a pin the package installed. Only a missing or malformed
-	# pin needs the index: a router whose UCI was reset, or one installed from a
-	# release older than the multi-architecture fields. The pin names a specific
-	# release and its hash, so replacing it with whatever the mirror advertises
-	# silently rolls the daemon back.
+	# Re-check the installed pin: it may have been written while the download was
+	# in flight (post-install runs before the service starts, but a manual
+	# "uci commit" could race). A usable pin always wins over the feed.
 	current_sha="$(uci -q get opensocks.settings.binary_sha256)"
 	current_url="$(uci -q get opensocks.settings.binary_url)"
-	if [ ${#current_sha} -eq 64 ] && [ -n "$current_url" ]; then
-		case "$current_sha" in *[!0-9a-f]*) ;; *) return 0;; esac
-	fi
+	pin_is_usable "$current_sha" "$current_url" && return 0
 
 	uci set opensocks.settings.binary_sha256="$new_sha"
 	uci set opensocks.settings.binary_url="$new_url"

@@ -25,26 +25,39 @@ OpenSocksはTransocks（穿梭）の中国向け回国回線サービスをOpenW
 
 ## インストール
 
-opkgリポジトリの利用を推奨します。
+ソフトウェア源は**恒久 URL**です。`releases/latest` は常に最新リリースを指すため、登録した1行は新しいバージョンが出ても書き換える必要がありません。
+
+### OpenWrt 25.12 以降（apk）
+
+OpenWrt 25.12 からパッケージマネージャが opkg から apk に変わり、パッケージ形式は `.apk` になります。
 
 ```sh
-wget -O /etc/opkg/keys/d24a5e234001294c https://rel.n4t.su/opkg/d24a5e234001294c
-echo 'src/gz opensocks https://rel.n4t.su/opkg' >> /etc/opkg/customfeeds.conf
+# 署名鍵を取得（opensocks.pem は全リリースで同一の鍵です）
+wget -O /etc/apk/keys/opensocks.pem \
+  https://github.com/rticks/OpenSocks/releases/latest/download/opensocks.pem
+
+# 恒久フィードを登録
+echo 'https://github.com/rticks/OpenSocks/releases/latest/download/packages.adb' \
+  >> /etc/apk/repositories.d/customfeeds.list
+
+apk update
+apk add opensocks-minimal luci-app-opensocks
+```
+
+更新は同じ行のまま `apk add --upgrade opensocks-minimal luci-app-opensocks` で行えます。`apk del` は依存パッケージも一緒に削除するため、削除する場合は必要なパッケージを入れ直してください。
+
+### OpenWrt 22.03–24.10（opkg）
+
+`.ipk` も同じ恒久 URL から取得できます。署名は行わず、`Packages` をそのまま使います。
+
+```sh
+SRC=https://github.com/rticks/OpenSocks/releases/latest/download
+echo "src/gz opensocks $SRC" >> /etc/opkg/customfeeds.conf
 opkg update
 opkg install opensocks-minimal luci-app-opensocks
 ```
 
-### OpenWrt 25.12 以降（apk）
-
-OpenWrt 25.12 からパッケージマネージャが opkg から apk に変わり、パッケージ形式は `.apk` になります。両方のリポジトリを同時に登録できます（22.03–24.10 は opkg、25.12 以降は apk）。
-
-```sh
-# OpenWrt 25.12+ (apk): register the feed, trust the key, install.
-wget -O /etc/apk/keys/opensocks.pem https://rel.n4t.su/opkg/apk/opensocks.pem
-echo 'https://rel.n4t.su/opkg/apk/packages.adb' >> /etc/apk/repositories.d/customfeeds.list
-apk update
-apk add opensocks-minimal luci-app-opensocks
-```
+> opkg は `Packages` の `Filename:` を基準に `.ipk` を解決するため、フィードの場所と `.ipk` の場所が同じである必要があります。上記の URL はその条件を満たしています。
 
 apk リポジトリでは `opensocks-minimal` と `luci-app-opensocks` は `noarch`、`opensocks` 完全版は実際の CPU アーキテクチャ（例: `mipsel_24kc`、`aarch64_cortex-a53`）向けに構築されます。
 

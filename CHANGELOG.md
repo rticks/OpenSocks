@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.5
+
+### A permanent feed URL
+
+- The documented feed is now `https://github.com/rticks/OpenSocks/releases/latest/download`, which always resolves to the newest published release. Register it once and it keeps working across every version; there is no longer a line to edit per release. Verified on a 25.12.6 router: `apk update` reported `OpenSocks 0.3.4` from that URL, `apk fetch` downloaded both `opensocks-minimal` and `luci-app-opensocks` through it, and `apk verify` returned `OK` for each. The signing key is identical in every release (`opensocks.pem` hashes the same from v0.3.1 through v0.3.4), so one registered key keeps validating future indexes.
+- Separated the two URL bases that a release build needs. They have opposite version requirements and had been sharing one variable, which is what forced a per-release edit:
+  - `FEED_BASE` — the index a router registers. Version *independent*, so `releases/latest`.
+  - `BINARY_BASE` — where a specific daemon archive lives. Version *pinned*. Pointing this at `releases/latest` would make an installed 0.3.4 fetch the next release's archive, fail the SHA-256 check, and never start, so it stays at `releases/download/v<version>`.
+- Changed the launcher's built-in default feed from the third-party `rel.n4t.su` mirror (which still publishes 0.2.13) to the project's own permanent URL, and its default key from the opkg usign key path to `/etc/apk/keys/opensocks.pem`. The refresh now returns before touching the network when the installed pin is already usable, so a normal boot costs no extra request.
+- Factored the "is this pin usable" rule into `pin_is_usable()` so the same predicate is applied both before the fetch and after it.
+- `openwrt/opensocks-minimal/tests/feed_pin_test.sh` now also asserts the default feed is the version-independent `releases/latest` URL and that the third-party mirror is gone as a feed value.
+- CI now proves, after publishing, that the permanent URL actually serves this release: it fetches `packages.adb` and `opensocks.pem` from `<repo>/releases/latest/download`, compares the served index byte-for-byte with the one just built, and checks the launcher's default feed matches the documented URL. A draft, a prerelease, or a failed publish would otherwise leave the documented URL pointing at the previous version.
+- READMEs (zh/en/ja) updated to the permanent feed, with the opkg instructions corrected to point at the same base (opkg resolves `.ipk` relative to `Packages`, so the two must share a directory).
+
+### Packaging
+
+- Bumped `opensocks`, `opensocks-minimal` and `luci-app-opensocks` to 0.3.5.
+
 ## 0.3.4
 
 ### The feed refresh no longer rolls the installed release back

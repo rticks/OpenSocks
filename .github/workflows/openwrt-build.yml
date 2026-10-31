@@ -175,6 +175,15 @@ jobs:
           export OPENSOCKS_BINARY_LAYOUT=flat
           echo "daemon download base: $BINARY_BASE"
 
+          # The registered feed URL is version independent: "releases/latest"
+          # resolves to whatever the newest published release is. A router adds
+          # this line once and keeps upgrading without editing it. This is NOT
+          # the daemon archive base above: that one must stay pinned to this tag,
+          # because the minimal package bakes a SHA-256 for the archive and the
+          # launcher rejects a mismatched one.
+          export FEED_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+          echo "registered feed base: $FEED_BASE"
+
           export OPENWRT_ONLY=1
           export BUILD_APK=1
           export RELEASE_DIR VERSION RELEASE
@@ -394,3 +403,39 @@ jobs:
             exit 1
           }
           echo 'minimal daemon URL is downloadable'
+
+          # The README tells users to register ONE url and never touch it again:
+          #   <repo>/releases/latest/download/packages.adb
+          # That only keeps working if "latest" actually resolves to this release
+          # and serves a signed index. A draft, a prerelease, or a publish that
+          # silently fails would leave the documented URL pointing at the previous
+          # version, and users would never see the update.
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+          for asset in packages.adb opensocks.pem; do
+            curl -fsSIL --retry 3 --max-time 45 "$base/$asset" >/dev/null || {
+              echo "the permanent feed URL does not serve $asset:" >&2
+              echo "  $base/$asset" >&2
+              exit 1
+            }
+          done
+          echo 'permanent feed URL serves the apk index and key'
+
+          # Confirm "latest" points at THIS tag rather than a stale release: the
+          # published index must describe the version we just built.
+          latest_index="${RUNNER_TEMP}/latest-packages.adb"
+          curl -fsSL --retry 3 --max-time 45 "$base/packages.adb" -o "$latest_index"
+          cmp -s "$latest_index" "$RELEASE_DIR/repo/packages.adb" || {
+            echo 'the permanent feed does not serve this release yet' >&2
+            echo "expected the index of $GITHUB_REF_NAME at $base/packages.adb" >&2
+            exit 1
+          }
+          echo "permanent feed resolves to $GITHUB_REF_NAME"
+
+          # The launcher's built-in default must be the same permanent URL, so a
+          # router that never set OPENSOCKS_FEED still gets the documented feed.
+          grep -qE '^feed="\$\{OPENSOCKS_FEED:-https://github\.com/[^/]+/[^/]+/releases/latest/download\}"$' \
+            "$GITHUB_WORKSPACE/openwrt/opensocks-minimal/files/usr/lib/opensocks/launcher.sh" || {
+            echo 'the launcher default feed is not the permanent latest URL' >&2
+            exit 1
+          }
+          echo 'launcher default feed matches the documented permanent URL'

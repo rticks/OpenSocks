@@ -34,9 +34,12 @@ launcher="$root/openwrt/opensocks-minimal/files/usr/lib/opensocks/launcher.sh"
 grep -q 'current_sha="\$(uci -q get opensocks.settings.binary_sha256)"' "$launcher" ||
 	fail 'refresh must read the installed binary_sha256 before deciding'
 
-# 2) It returns when the installed pin is a well-formed 64-hex hash.
-grep -q 'if \[ \${#current_sha} -eq 64 \] && \[ -n "\$current_url" \]; then' "$launcher" ||
-	fail 'refresh must treat a well-formed installed pin as authoritative'
+# 2) It returns when the installed pin is usable. The predicate is factored out
+#    so the same rule is applied before and after the network fetch.
+grep -q '^pin_is_usable() {' "$launcher" ||
+	fail 'the pin predicate must be a named function so both checks share it'
+grep -q 'pin_is_usable "\$current_sha" "\$current_url" && return 0' "$launcher" ||
+	fail 'refresh must treat a usable installed pin as authoritative'
 
 # 3) The comparison is against "current", not "new": a newer-index-wins check
 #    would have passed the test above while still rolling 0.3.3 back to 0.2.13.
@@ -48,13 +51,27 @@ fi
 grep -q '^refresh_release_metadata() {' "$launcher" ||
 	fail 'refresh_release_metadata must still exist for a router with no pin'
 
+# 5) The default feed must be the version-independent release feed, not a
+#    version-pinned or third-party URL. A pinned URL would need editing on every
+#    release, which is exactly what the permanent feed removes.
+grep -qE '^feed="\$\{OPENSOCKS_FEED:-https://github\.com/[^/]+/[^/]+/releases/latest/download\}"$' "$launcher" ||
+	fail 'the default feed must be <repo>/releases/latest/download (version independent)'
+# A comment may still explain the history; what must not survive is the mirror as
+# an actual feed/key value. Match only lines where it appears outside a comment.
+if grep -vE '^[[:space:]]*#' "$launcher" | grep -q 'rel\.n4t\.su'; then
+	fail 'the launcher must not use the third-party mirror as a feed value'
+fi
+
 # --- Behavioural checks ------------------------------------------------------
 # Drive the shipped decision block with stub uci/wget/usign, exactly as the
 # launcher calls it. Only the guard under test is exercised.
 
-# Extract the refresh function body and run it against a stub environment.
+# Extract the refresh function body and the pin predicate, then run them against
+# a stub environment. Both are taken verbatim from the shipped launcher.
 awk '/^refresh_release_metadata\(\) \{/,/^\}$/' "$launcher" > "$work/refresh.sh"
 [ -s "$work/refresh.sh" ] || fail 'could not extract refresh_release_metadata'
+awk '/^pin_is_usable\(\) \{/,/^\}$/' "$launcher" > "$work/pin.sh"
+[ -s "$work/pin.sh" ] || fail 'could not extract pin_is_usable'
 
 mkdir -p "$work/bin" "$work/tmp"
 cat > "$work/bin/uci" <<'STUB'
@@ -110,8 +127,9 @@ printf 'mipsel\n'
 STUB
 chmod 0755 "$work/bin/uname"
 
-# A feed that advertises an OLDER release than the installed pin, which is what
-# the rel.n4t.su mirror does today.
+# A feed that advertises an OLDER release than the installed pin. Any feed can go
+# stale - a cached CDN, a lagging mirror - so the guard must hold regardless of
+# which URL the feed points at.
 cat > "$work/Packages" <<'EOF'
 Package: opensocks-minimal
 Version: 0.2.13-1
@@ -136,12 +154,14 @@ run_refresh() {
 		FEED_PACKAGES="$work/Packages"
 		export FEED_PACKAGES
 		dir="$work/tmp"
-		feed='https://rel.n4t.su/opkg'
+		feed='https://github.com/rticks/OpenSocks/releases/latest/download'
 		# refresh_release_metadata bails on "[ -s $feed_key ]", so the stub key
 		# must be non-empty or every case would return before the guard.
 		feed_key="$work/key"
 		printf 'stub-key\n' > "$feed_key"
-		# Functions the refresh calls, taken verbatim from the launcher.
+		# Functions the refresh calls. pin_is_usable is taken verbatim from the
+		# shipped launcher so the guard under test is the shipped one.
+		. "$work/pin.sh"
 		detect_binary_suffix() { printf 'mipsle\n'; }
 		binary_url_matches() {
 			name="opensocks-linux-$3.gz"

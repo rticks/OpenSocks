@@ -25,26 +25,40 @@ OpenSocks 是用于在 OpenWrt 上使用 Transocks（穿梭）中国回国线路
 
 ## 安装
 
-推荐使用软件源：
+软件源使用**固定 URL**：`releases/latest` 始终指向最新发布版，因此注册一次后无需随版本改动。
+
+### OpenWrt 25.12 及以上（apk）
+
+OpenWrt 25.12 起包管理器由 opkg 换成 apk，包格式为 `.apk`。
 
 ```sh
-wget -O /etc/opkg/keys/d24a5e234001294c https://rel.n4t.su/opkg/d24a5e234001294c
-echo 'src/gz opensocks https://rel.n4t.su/opkg' >> /etc/opkg/customfeeds.conf
+# 获取签名公钥（opensocks.pem 在各版本中相同）
+wget -O /etc/apk/keys/opensocks.pem \
+  https://github.com/rticks/OpenSocks/releases/latest/download/opensocks.pem
+
+# 注册固定源
+echo 'https://github.com/rticks/OpenSocks/releases/latest/download/packages.adb' \
+  >> /etc/apk/repositories.d/customfeeds.list
+
+apk update
+apk add opensocks-minimal luci-app-opensocks
+```
+
+升级使用同一行即可：`apk add --upgrade opensocks-minimal luci-app-opensocks`。
+注意 `apk del` 会连带删除无人依赖的包，卸载后请按需重新安装。
+
+### OpenWrt 22.03–24.10（opkg）
+
+`.ipk` 也可从同一固定 URL 获取，该源不签名。
+
+```sh
+SRC=https://github.com/rticks/OpenSocks/releases/latest/download
+echo "src/gz opensocks $SRC" >> /etc/opkg/customfeeds.conf
 opkg update
 opkg install opensocks-minimal luci-app-opensocks
 ```
 
-### OpenWrt 25.12 及以上（apk）
-
-OpenWrt 25.12 起包管理器由 opkg 换成 apk，包格式为 `.apk`。两个软件源可同时存在：22.03–24.10 用 opkg，25.12+ 用 apk。
-
-```sh
-# OpenWrt 25.12+ (apk): register the feed, trust the key, install.
-wget -O /etc/apk/keys/opensocks.pem https://rel.n4t.su/opkg/apk/opensocks.pem
-echo 'https://rel.n4t.su/opkg/apk/packages.adb' >> /etc/apk/repositories.d/customfeeds.list
-apk update
-apk add opensocks-minimal luci-app-opensocks
-```
+> opkg 以 `Packages` 的位置为基准解析 `.ipk`，因此源地址与 `.ipk` 必须位于同一目录。上面的 URL 满足该条件。
 
 `opensocks-minimal` 与 `luci-app-opensocks` 在 apk 源中的架构为 `noarch`；`opensocks` 完整包按真实 CPU 架构构建（例如 `mipsel_24kc`、`aarch64_cortex-a53`）。
 

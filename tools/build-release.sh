@@ -2,23 +2,37 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-0.3.4}"
+VERSION="${VERSION:-0.3.5}"
 RELEASE="${RELEASE:-1}"
 OUT="${RELEASE_DIR:-$ROOT/../release/$VERSION}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
-FEED_BASE="${FEED_BASE:-https://rel.n4t.su/opkg}"
+# Two bases with different requirements, and confusing them breaks boot:
+#
+#  FEED_BASE is the index a router registers once. It must be version
+#  INDEPENDENT, so "releases/latest" is right: it always resolves to the newest
+#  published release, and the index describes whatever versions that release
+#  contains.
+#
+#  BINARY_BASE is where a specific daemon archive lives. It must be version
+#  PINNED, because the minimal package bakes a SHA-256 next to it and the
+#  launcher refuses an archive whose hash differs. Pointing this at
+#  "releases/latest" would make an installed 0.3.4 fetch 0.4.0's archive, fail
+#  the checksum, and never start.
+REPO_SLUG="${REPO_SLUG:-rticks/OpenSocks}"
+FEED_BASE="${FEED_BASE:-https://github.com/${REPO_SLUG}/releases/latest/download}"
 # Where the download-on-boot daemon archives live.
 #
 #   flat   <BINARY_BASE>/opensocks-linux-<suffix>.gz
 #          A GitHub Release serves exactly this layout.
 #   by-sha <BINARY_BASE>/by-sha/<sha256>/opensocks-linux-<suffix>.gz
-#          Content addressed, so a CDN may cache it forever.
+#          Content addressed, so a CDN may cache it forever and a shared
+#          BINARY_BASE stays safe across releases.
 #
-# The default is flat because that is what a release download looks like, and
-# the minimal package's launcher verifies the archive against the SHA-256 baked
-# into UCI either way. Set OPENSOCKS_BINARY_LAYOUT=by-sha for the mirror.
-BINARY_BASE="${BINARY_BASE:-$FEED_BASE}"
+# The default is flat against this release's own tag, which is what a GitHub
+# Release download looks like. Set OPENSOCKS_BINARY_LAYOUT=by-sha together with a
+# shared BINARY_BASE for a content-addressed mirror.
+BINARY_BASE="${BINARY_BASE:-https://github.com/${REPO_SLUG}/releases/download/v${VERSION}}"
 BINARY_LAYOUT="${OPENSOCKS_BINARY_LAYOUT:-flat}"
 
 binary_url() {

@@ -21,7 +21,10 @@
 #   APK_PUBLIC_KEY_FILE    explicit public key path  (default <key-dir>/public.pem)
 #   REQUIRE_SIGNATURE=1    kept for the shared call convention; a key is always
 #                          required here, so this flag no longer changes anything
-#   FEED_BASE              base URL for the download-on-boot binaries
+#   FEED_BASE              version-independent index URL (default
+#                          <repo>/releases/latest/download)
+#   BINARY_BASE            version-pinned base for the daemon archives (default
+#                          <repo>/releases/download/v<version>)
 #   OPENSOCKS_TARGETS      same syntax as build-release.sh
 #   APK_SKIP_VERIFY=1      skip the apk self checks (debugging only)
 #
@@ -91,12 +94,18 @@ KEY_DIR="${5:-}"
 }
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
-FEED_BASE="${FEED_BASE:-https://rel.n4t.su/opkg}"
-# Where the download-on-boot daemon archives live. Must match
-# tools/build-release.sh: "flat" is a plain release download layout, "by-sha" is
-# the content-addressed mirror layout. The launcher verifies the archive against
-# the SHA-256 baked into UCI, so the layout only decides the path.
-BINARY_BASE="${BINARY_BASE:-$FEED_BASE}"
+# Must match tools/build-release.sh. FEED_BASE is the index a router registers
+# once, so it is version independent ("releases/latest"). BINARY_BASE locates a
+# specific daemon archive and has to be version pinned, because the package bakes
+# a SHA-256 beside it and the launcher refuses a mismatched archive: pointing it
+# at "releases/latest" would make an installed release fetch a newer archive,
+# fail the checksum, and never start.
+REPO_SLUG="${REPO_SLUG:-rticks/OpenSocks}"
+FEED_BASE="${FEED_BASE:-https://github.com/${REPO_SLUG}/releases/latest/download}"
+# "flat" is a plain release download layout, "by-sha" is the content-addressed
+# mirror layout. The launcher verifies the archive against the SHA-256 baked into
+# UCI, so the layout only decides the path.
+BINARY_BASE="${BINARY_BASE:-https://github.com/${REPO_SLUG}/releases/download/v${VERSION}}"
 BINARY_LAYOUT="${OPENSOCKS_BINARY_LAYOUT:-flat}"
 
 binary_url() {
