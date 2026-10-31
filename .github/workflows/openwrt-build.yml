@@ -67,6 +67,19 @@ jobs:
           set -eu
           sh openwrt/opensocks-minimal/tests/launcher_cache_test.sh
 
+      - name: Check the feed refresh cannot roll the pin back
+        run: |
+          # refresh_release_metadata() reads a usign-signed Packages index and
+          # used to write its binary_url/binary_sha256 into UCI unconditionally.
+          # The default feed is the rel.n4t.su mirror, which still advertises
+          # 0.2.13, so on a 25.12.6 router the first service start after an
+          # upgrade rewrote the v0.3.3 pin back to 0.2.13 and ran the old daemon
+          # while apk reported the new version installed. This drives the shipped
+          # guard: a usable installed pin must survive an older index, while a
+          # missing or malformed pin is still filled in from the index.
+          set -eu
+          sh openwrt/opensocks-minimal/tests/feed_pin_test.sh
+
       - name: Build pinned OpenWrt usign
         run: |
           git clone --no-checkout https://git.openwrt.org/project/usign.git "${RUNNER_TEMP}/usign"

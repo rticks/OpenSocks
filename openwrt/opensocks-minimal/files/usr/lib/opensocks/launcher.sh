@@ -94,6 +94,18 @@ binary_url_matches() {
 }
 
 # Best effort: only runs where a usign-signed opkg index is actually available.
+#
+# This is a FALLBACK for a router with no usable pin, not the source of truth.
+# The package's post-install pins the URL and SHA-256 of the release it was built
+# from, and that pin is what the user installed. An index refresh used to rewrite
+# those values unconditionally, which on a 25.12.6 router undid a package upgrade:
+# "apk add --upgrade" set binary_url to the v0.3.3 asset, then the next service
+# start read the stale rel.n4t.su index (which still advertises 0.2.13), wrote
+# 0.2.13's URL and SHA back into UCI, and kept running the old daemon while apk
+# reported the new version installed. The refresh now only fills in a pin that is
+# missing or malformed, so it can never move an installed release backwards. A
+# router that wants a newer build upgrades the package, whose post-install (and
+# post-upgrade) repins it.
 refresh_release_metadata() {
 	command -v usign >/dev/null 2>&1 || return 1
 	[ -s "$feed_key" ] || return 1
@@ -125,6 +137,18 @@ refresh_release_metadata() {
 	[ ${#new_sha} -eq 64 ] || return 1
 	case "$new_sha" in *[!0-9a-f]*) return 1;; esac
 	binary_url_matches "$new_url" "$new_sha" "$suffix" || return 1
+
+	# Never overwrite a pin the package installed. Only a missing or malformed
+	# pin needs the index: a router whose UCI was reset, or one installed from a
+	# release older than the multi-architecture fields. The pin names a specific
+	# release and its hash, so replacing it with whatever the mirror advertises
+	# silently rolls the daemon back.
+	current_sha="$(uci -q get opensocks.settings.binary_sha256)"
+	current_url="$(uci -q get opensocks.settings.binary_url)"
+	if [ ${#current_sha} -eq 64 ] && [ -n "$current_url" ]; then
+		case "$current_sha" in *[!0-9a-f]*) ;; *) return 0;; esac
+	fi
+
 	uci set opensocks.settings.binary_sha256="$new_sha"
 	uci set opensocks.settings.binary_url="$new_url"
 	uci commit opensocks

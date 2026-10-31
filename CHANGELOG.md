@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.4
+
+### The feed refresh no longer rolls the installed release back
+
+- Fixed a package upgrade being undone on the next service start. `refresh_release_metadata()` reads a usign-signed `Packages` index and wrote its `binary_url`/`binary_sha256` into UCI unconditionally. The default feed is the `rel.n4t.su` mirror, which still advertises 0.2.13. On a 25.12.6 mipsle router the sequence was: `apk add --upgrade` installed 0.3.3 and its `post-upgrade` pinned `binary_url` to the v0.3.3 asset; the next `service start` read the stale mirror index and wrote 0.2.13's URL and SHA back into UCI; the launcher then downloaded and ran 0.2.13 while `apk list -I` reported 0.3.3 installed. The refresh is now a fallback only: it returns without touching UCI when the installed pin is a well-formed 64-hex SHA-256 plus a URL. A missing or malformed pin is still filled in from the index, so a router whose UCI was reset or that was installed from a pre-multi-architecture release still gets a working URL. A router that wants a newer build upgrades the package, whose `post-upgrade` repins it.
+- Added `openwrt/opensocks-minimal/tests/feed_pin_test.sh`, which extracts the shipped refresh function, stubs `uci`/`wget`/`usign`, and asserts a usable pin survives an index advertising an older build while a missing or malformed pin is filled in. It runs in CI.
+
+### Packaging
+
+- Bumped `opensocks`, `opensocks-minimal` and `luci-app-opensocks` to 0.3.4.
+
 ## 0.3.3
 
 ### Package upgrade scripts
