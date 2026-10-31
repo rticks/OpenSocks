@@ -279,6 +279,33 @@ jobs:
           # at this point the release's assets do not exist yet even on a tag, so
           # fetching the URL here would always 404.
 
+          # apk runs "post-install" only for a fresh install and "post-upgrade"
+          # only when replacing an existing version (src/database.c:
+          #   (oldpkg == NULL) ? APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE).
+          # A package that ships only post-install therefore never runs its setup
+          # script on upgrade: the shipped opensocks-minimal 0.3.2 left
+          # opensocks.settings.binary_url pointing at v0.3.1 after "apk add
+          # --upgrade" reported 0.3.2-r1 installed. Assert both script slots are
+          # present in every package that has an install-time script.
+          for apk in "$RELEASE_DIR/repo"/*.apk; do
+            dumped="$("$APK_BIN" adbdump "$apk" 2>/dev/null)"
+            case "$(basename "$apk")" in
+            opensocks-minimal-* | opensocks-[0-9]*)
+              for slot in post-install post-upgrade; do
+                case "$dumped" in
+                *"$slot"*) ;;
+                *)
+                  echo "$(basename "$apk") ships no $slot script" >&2
+                  echo 'an upgraded router would keep the previous release settings' >&2
+                  exit 1
+                  ;;
+                esac
+              done
+              ;;
+            esac
+          done
+          echo 'install and upgrade scripts are both registered'
+
       - name: Upload OpenWrt artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

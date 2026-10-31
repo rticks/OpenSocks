@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3
+
+### Package upgrade scripts
+
+- Fixed an upgraded router never running the package's setup script. apk runs `post-install` only for a fresh install and `post-upgrade` only when replacing an existing version (`src/database.c`: `(oldpkg == NULL) ? APK_SCRIPT_POST_INSTALL : APK_SCRIPT_POST_UPGRADE`), and both `opensocks` and `opensocks-minimal` registered only `post-install`. The consequence was observed on a 25.12.6 mipsle router: `apk add --upgrade` moved `opensocks-minimal` to 0.3.2-r1 while `uci get opensocks.settings.binary_url` still pointed at the v0.3.1 asset, so the launcher went on downloading the previous daemon and the upgrade changed nothing the user could see. Both packages now register `post-upgrade` with the same body as `post-install`, so the URL and SHA-256 are repinned and the service is restarted on upgrade as well as on install.
+- The daemon package's `post-upgrade` also restarts the service: without it an upgrade replaced `/usr/lib/opensocks/launcher.sh` while procd kept the already-running daemon, so the new launcher only took effect at the next reboot.
+- Added a release-time check that dumps every produced package with `apk adbdump` and fails when `opensocks` or `opensocks-minimal` does not carry both `post-install` and `post-upgrade`.
+
+### Packaging
+
+- Bumped `opensocks`, `opensocks-minimal` and `luci-app-opensocks` to 0.3.3.
+
 ## 0.3.2
 
 ### Traffic accounting and connection state

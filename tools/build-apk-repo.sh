@@ -300,7 +300,12 @@ if [ -x /etc/rc.common ]; then
 fi
 exit 0
 EOF
-	chmod 0755 "$dir/post-install" "$dir/pre-deinstall"
+	# apk distinguishes install from upgrade: "post-install" runs only on a fresh
+	# install and "post-upgrade" only when replacing a version. Registering just
+	# post-install leaves an upgraded router with the old init script enabled but
+	# never restarted, so the new daemon is not picked up until the next reboot.
+	cp "$dir/post-install" "$dir/post-upgrade"
+	chmod 0755 "$dir/post-install" "$dir/post-upgrade" "$dir/pre-deinstall"
 }
 
 # Minimal launcher post-install: pick the CPU suffix, then pin the matching
@@ -356,7 +361,14 @@ uci commit opensocks
 ( sleep 2; /etc/init.d/opensocks start >/dev/null 2>&1 || true ) &
 exit 0
 EOF
-	chmod 0755 "$dir/post-install"
+	# apk runs "post-install" only for a fresh install and "post-upgrade" only when
+	# replacing a version. Registering just post-install meant an upgraded router
+	# kept the previous release's binary_url in UCI, so the launcher went on
+	# downloading the OLD daemon while apk reported the new package version.
+	# Observed on 25.12.6: "apk add --upgrade" moved opensocks-minimal to 0.3.2-r1
+	# and left opensocks.settings.binary_url pointing at v0.3.1.
+	cp "$dir/post-install" "$dir/post-upgrade"
+	chmod 0755 "$dir/post-install" "$dir/post-upgrade"
 }
 
 # build_apk <output> <name> <arch> <origin> <description> <depends> \
@@ -498,6 +510,7 @@ while IFS= read -r target; do
 			'Low-memory Transocks daemon with TCP REDIRECT and UDP TPROXY' \
 			"$DAEMON_DEPENDS" "$stage" \
 			--script "post-install:$scripts/post-install" \
+			--script "post-upgrade:$scripts/post-upgrade" \
 			--script "pre-deinstall:$scripts/pre-deinstall" || exit 1
 		PROVIDES=""
 		printf 'built opensocks-%s-%s.apk\n' "$APK_VERSION" "$arch"
@@ -551,7 +564,8 @@ build_apk "$OUT/opensocks-minimal-$APK_VERSION-noarch.apk" \
 	opensocks-minimal noarch opensocks-minimal \
 	'Minimal verified download-on-boot launcher for OpenSocks' \
 	"$MINIMAL_DEPENDS" "$minimal_stage" \
-	--script "post-install:$minimal_scripts/post-install"
+	--script "post-install:$minimal_scripts/post-install" \
+	--script "post-upgrade:$minimal_scripts/post-upgrade"
 PROVIDES=""
 printf 'built opensocks-minimal-%s-noarch.apk\n' "$APK_VERSION"
 

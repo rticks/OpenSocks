@@ -2,7 +2,7 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-0.3.2}"
+VERSION="${VERSION:-0.3.3}"
 RELEASE="${RELEASE:-1}"
 OUT="${RELEASE_DIR:-$ROOT/../release/$VERSION}"
 WORK="$(mktemp -d)"
