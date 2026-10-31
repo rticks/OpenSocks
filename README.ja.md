@@ -46,6 +46,10 @@ apk add opensocks-minimal luci-app-opensocks
 
 更新は同じ行のまま `apk add --upgrade opensocks-minimal luci-app-opensocks` で行えます。`apk del` は依存パッケージも一緒に削除するため、削除する場合は必要なパッケージを入れ直してください。
 
+> **`opensocks-minimal` だけで十分です。** これは約 12 KiB で、daemon のバイナリを同梱せず、起動時に署名付きのアーカイブを `/tmp`（RAM）へダウンロードして展開します。フラッシュを消費しないため、8 MB クラスの容量の少ない端末でも問題ありません。
+>
+> 一方 `opensocks` 完全版は daemon バイナリを同梱するため**約 2.3 MiB** をフラッシュに置きます。`luci-app-opensocks` はどちらか一方があれば動く（`+(opensocks||opensocks-minimal)`）ので、容量が厳しい端末では minimal だけを入れてください。両方を入れる必要はありません。
+
 ### OpenWrt 22.03–24.10（opkg）
 
 `.ipk` も同じ恒久 URL から取得できます。署名は行わず、`Packages` をそのまま使います。

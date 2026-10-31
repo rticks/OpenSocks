@@ -49,6 +49,16 @@ Upgrade with the same registration: `apk add --upgrade opensocks-minimal luci-ap
 Note that `apk del` also removes dependencies that nothing else needs; reinstall
 them if you remove the package.
 
+> **`opensocks-minimal` on its own is enough.** It is about 12 KiB and ships no
+> daemon binary: the launcher downloads the signed archive into `/tmp` (RAM) and
+> unpacks it at boot, so it costs no flash. That makes it the right choice for
+> 8 MB-class routers.
+>
+> The full `opensocks` package embeds the daemon binary and therefore puts about
+> **2.3 MiB** on flash. `luci-app-opensocks` depends on `+(opensocks||opensocks-minimal)`,
+> so either one satisfies it — there is no reason to install both on a device
+> where space is tight.
+
 ### OpenWrt 22.03–24.10 (opkg)
 
 The `.ipk` files are served from the same permanent URL. The feed is unsigned,

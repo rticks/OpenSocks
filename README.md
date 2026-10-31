@@ -47,6 +47,10 @@ apk add opensocks-minimal luci-app-opensocks
 升级使用同一行即可：`apk add --upgrade opensocks-minimal luci-app-opensocks`。
 注意 `apk del` 会连带删除无人依赖的包，卸载后请按需重新安装。
 
+> **只装 `opensocks-minimal` 就够了。** 它约 12 KiB，不包含 daemon 二进制，启动时把签名压缩包下载到 `/tmp`（内存）再解压，因此不占用 flash，适合 8 MB 级别的设备。
+>
+> 完整版 `opensocks` 会把 daemon 二进制打包进去，需要约 **2.3 MiB** 的 flash。`luci-app-opensocks` 的依赖是 `+(opensocks||opensocks-minimal)`，两者满足其一即可 —— 容量紧张时没有理由同时安装。
+
 ### OpenWrt 22.03–24.10（opkg）
 
 `.ipk` 也可从同一固定 URL 获取，该源不签名。
