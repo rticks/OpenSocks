@@ -480,6 +480,11 @@ func (c *controller) disconnect() error {
 	// landing between "stop the engine" and "clear the flag" would reconnect
 	// before the flag was ever consulted.
 	c.suspendAutoRoute()
+	// Take connectMu so a concurrent connect() cannot start a session between
+	// the teardown's two halves and leave the engine stopped with routing in
+	// place. connect() holds the same mutex for its whole body.
+	c.connectMu.Lock()
+	defer c.connectMu.Unlock()
 	c.refreshSettings()
 	c.engine.stop()
 	teardownRedirect()

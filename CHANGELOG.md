@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.7
+
+### Disconnect no longer hangs the daemon
+
+- Fixed `POST /disconnect` never returning. The teardown closed the listening
+  sockets and then waited on the listener's `WaitGroup`, but connections that
+  had already been accepted were not closed and kept running. One idle
+  keep-alive or long download was enough to keep the group non-zero, so the wait
+  never finished. `engine.stop()` holds the engine mutex while it waits, so the
+  whole control API wedged behind it: `/disconnect` timed out and `/status`
+  stopped answering. Because `teardownRedirect()` runs after `engine.stop()`, the
+  `inet opensocks` table also stayed in place — the tunnel looked connected
+  while the daemon was stuck.
+- The listener now tracks the connections it accepted and closes them during
+  teardown, so a stop drops in-flight traffic instead of waiting for clients to
+  hang up.
+- The wait itself is bounded (`ssStopWait`, three seconds). A relay that ignores
+  its closed connection is abandoned with a log line rather than being allowed to
+  block the control API indefinitely.
+- `disconnect()` now takes the same `connectMu` as `connect()`, so a watchdog or
+  API connect cannot interleave with the teardown and leave the engine stopped
+  while routing stayed installed.
+- Added `engine_stop_test.go`: it opens a connection through a real listener,
+  leaves it idle, and asserts the teardown returns promptly and closes it. A
+  second test proves a connection accepted after close cannot be registered, so
+  it cannot hold the group open.
+
+### Packaging
+
+- Bumped `opensocks`, `opensocks-minimal` and `luci-app-opensocks` to 0.3.7.
+
 ## 0.3.6
 
 ### Disconnect now stays disconnected

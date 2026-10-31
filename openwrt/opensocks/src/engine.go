@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -136,6 +136,39 @@ type ssListener struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// connMu guards conns: the client connections this listener is currently
+	// serving. Closing a listener stops new accepts but leaves connections that
+	// were already accepted running, so a stop that only closed the socket would
+	// block in wg.Wait() for as long as a client kept its connection open -
+	// forever, for a long-lived download or an idle keep-alive. A disconnect has
+	// to drop those connections explicitly, or the whole control API wedges
+	// behind e.mu while it waits for them.
+	connMu sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
+}
+
+// track registers an accepted connection so close() can drop it. It reports
+// false when the listener has already been closed, in which case the caller must
+// close the connection itself and stop.
+func (l *ssListener) track(conn net.Conn) bool {
+	l.connMu.Lock()
+	defer l.connMu.Unlock()
+	if l.closed {
+		return false
+	}
+	if l.conns == nil {
+		l.conns = make(map[net.Conn]struct{})
+	}
+	l.conns[conn] = struct{}{}
+	return true
+}
+
+func (l *ssListener) untrack(conn net.Conn) {
+	l.connMu.Lock()
+	delete(l.conns, conn)
+	l.connMu.Unlock()
 }
 
 // ssRuntime owns every listener the daemon started.
@@ -195,6 +228,12 @@ func (r *ssRuntime) start(upstream ssUpstream, label string, port int, transpare
 }
 
 // stopAll closes every listener and waits for its serving goroutines.
+//
+// The wait is bounded. close() drops the accepted connections, so the goroutines
+// should end promptly, but a stuck client must never be able to hold the control
+// API hostage: stop() runs with e.mu held, so an unbounded wait here hangs every
+// status request behind it. A relay goroutine that ignores its closed connection
+// past ssStopWait is abandoned to the runtime rather than blocking the daemon.
 func (r *ssRuntime) stopAll() {
 	r.mu.Lock()
 	listeners := r.listeners
@@ -204,7 +243,26 @@ func (r *ssRuntime) stopAll() {
 		l.close()
 	}
 	for _, l := range listeners {
+		l.waitStopped()
+	}
+}
+
+// ssStopWait is how long stopAll gives relay goroutines to notice their closed
+// connections. Relays copy with an idle deadline, so this only has to cover a
+// connection that was mid-write when close() ran.
+const ssStopWait = 3 * time.Second
+
+// waitStopped waits for the listener's goroutines, giving up after ssStopWait.
+func (l *ssListener) waitStopped() {
+	done := make(chan struct{})
+	go func() {
 		l.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(ssStopWait):
+		logf("%s did not stop within %s; abandoning its remaining connections", l.label, ssStopWait)
 	}
 }
 
@@ -222,7 +280,7 @@ func (r *ssRuntime) stopLast(n int) {
 		l.close()
 	}
 	for _, l := range removed {
-		l.wg.Wait()
+		l.waitStopped()
 	}
 }
 
@@ -250,6 +308,20 @@ func (l *ssListener) close() {
 	}
 	if l.udp != nil {
 		_ = l.udp.Close()
+	}
+	// Stop accepting AND drop the connections already in flight. Closing only
+	// the listener leaves accepted connections running, and the caller waits for
+	// them in wg.Wait(); one idle keep-alive would hang a disconnect forever.
+	l.connMu.Lock()
+	l.closed = true
+	conns := make([]net.Conn, 0, len(l.conns))
+	for conn := range l.conns {
+		conns = append(conns, conn)
+	}
+	l.conns = nil
+	l.connMu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
 	}
 }
 
@@ -290,6 +362,12 @@ func (l *ssListener) acceptLoop() {
 // before the application ever wrote its request.
 func (l *ssListener) handleTCP(conn net.Conn) {
 	defer conn.Close()
+	if !l.track(conn) {
+		// close() already ran between Accept and this call; it cannot see this
+		// connection, so closing it here is the only way it stops.
+		return
+	}
+	defer l.untrack(conn)
 	_ = conn.SetDeadline(time.Now().Add(ssHandshakeLimit))
 	var host string
 	var port int
